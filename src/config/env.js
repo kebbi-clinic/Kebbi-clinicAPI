@@ -30,6 +30,10 @@ const config = {
 
   /* When absent, the data layer falls back to an in-memory MongoDB (dev only). */
   mongoUri: process.env.MONGODB_URI || '',
+  /* Optional. On Vercel each request can land on a different instance, so
+   * Socket.IO fan-out and presence need Redis to be shared. Unset locally. */
+  redisUrl: process.env.REDIS_URL || '',
+
   jwtSecret: process.env.JWT_SECRET || 'kebbi-clinic-dev-secret-change-in-production',
   jwtExpiresIn: process.env.JWT_EXPIRES_IN || '12h',
 

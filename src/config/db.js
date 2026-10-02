@@ -3,8 +3,9 @@
 const mongoose = require('mongoose')
 const dns = require('dns')
 const { execFile } = require('child_process')
-const { MongoMemoryServer } = require('mongodb-memory-server')
 const path = require('path')
+/* mongodb-memory-server is required lazily inside openConnection() — it pulls a
+ * ~100MB mongod binary, so it must stay out of the serverless bundle. */
 const { config } = require('./env')
 const { SettingModel, CounterModel } = require('../models/setting.model')
 
@@ -110,45 +111,106 @@ async function upgradeSettings(doc) {
 
 let SETTINGS = null // in-memory cache of the _settings doc (lives behind getSettings())
 
-async function connect() {
+/* Connection options. `bufferCommands: false` is the important one: it stops
+ * Mongoose from parking a query in a buffer for 10s when the connection is not
+ * up yet, so a cold/down database surfaces as an immediate error the caller can
+ * turn into a 503 instead of a hung request. Combined with the await in
+ * api/index.js this is safe — no query ever runs before we are connected. */
+const CONNECT_OPTS = {
+  bufferCommands: false,
+  maxPoolSize: 10,
+}
+
+/* Running as a Vercel function (a single request occupying one invocation) is a
+ * very different budget from a long-running local server. A boot-time 3x retry
+ * with 2s sleeps can burn ~34s — fine when you're about to listen anyway, fatal
+ * on a serverless request that will be killed first. Detect it via the
+ * Vercel-provided env vars so we fail fast and let the next invocation retry. */
+const isServerless = !!(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.LAMBDA_TASK_ROOT)
+
+/* Attempt count + how long we're willing to hunt for a reachable server. */
+const ATTEMPTS = isServerless ? 1 : 3
+const SERVER_SELECTION_MS = isServerless ? 5_000 : 10_000
+const RETRY_DELAY_MS = 2_000
+
+const connectOpts = () => ({ ...CONNECT_OPTS, serverSelectionTimeoutMS: SERVER_SELECTION_MS })
+
+/* The in-flight (or resolved) connection promise. A serverless cold start runs
+ * several requests concurrently against one container; without this memo each
+ * one would open its own pool and thrash Atlas' connection limit. Cleared on
+ * failure so the NEXT invocation retries instead of replaying a dead handle. */
+let connectionPromise = null
+
+/* An unhandled 'error' on the connection is a fatal uncaught exception in Node
+ * and takes the whole lambda invocation down. Swallow + log; the next request
+ * re-runs ensureConnected(). */
+mongoose.connection.on('error', (err) => {
+  console.error('[db] connection error:', err.code || err.message)
+})
+
+async function openConnection() {
   if (config.mongoUri) {
     /* Atlas SRV lookups can fail with certain DNS resolvers/VPNs — retry a few
      * times before giving up so a transient network hiccup doesn't kill boot. */
     let lastErr
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    for (let attempt = 1; attempt <= ATTEMPTS; attempt++) {
       try {
-        await mongoose.connect(config.mongoUri, { serverSelectionTimeoutMS: 10_000 })
+        await mongoose.connect(config.mongoUri, connectOpts())
         console.log('[db] connected to MongoDB Atlas')
         await loadSettings()
         return
       } catch (err) {
         lastErr = err
-        console.warn(`[db] Atlas connection attempt ${attempt}/3 failed: ${err.code || err.message}`)
+        console.warn(`[db] Atlas connection attempt ${attempt}/${ATTEMPTS} failed: ${err.code || err.message}`)
         /* SRV resolution broken by the local resolver? Retry with a fully
          * resolved multi-host mongodb:// URI instead. */
         if (config.mongoUri.startsWith('mongodb+srv://')) {
           try {
             const direct = await resolveSrvUri(config.mongoUri)
-            await mongoose.connect(direct, { serverSelectionTimeoutMS: 10_000 })
+            await mongoose.connect(direct, connectOpts())
             console.log('[db] connected to MongoDB Atlas (SRV bypassed — direct shard hosts)')
             await loadSettings()
             return
           } catch (err2) {
             lastErr = err2
-            console.warn(`[db] SRV-bypass attempt ${attempt}/3 failed: ${err2.code || err2.message}`)
+            console.warn(`[db] SRV-bypass attempt ${attempt}/${ATTEMPTS} failed: ${err2.code || err2.message}`)
           }
         }
-        if (attempt < 3) await new Promise((r) => setTimeout(r, 2000))
+        if (attempt < ATTEMPTS) await new Promise((r) => setTimeout(r, RETRY_DELAY_MS))
       }
     }
     console.error('[db] Could not reach MongoDB Atlas. Check MONGODB_URI and your network/VPN.')
     console.error('[db] Tip: clear MONGODB_URI in backend/.env to run on the in-memory database instead.')
     throw lastErr
   }
+  /* Dev-only fallback. Lazy require keeps the mongod binary out of the bundle. */
+  const { MongoMemoryServer } = require('mongodb-memory-server')
   const mem = await MongoMemoryServer.create()
-  await mongoose.connect(mem.getUri())
+  await mongoose.connect(mem.getUri(), connectOpts())
   console.log('[db] connected to in-memory MongoDB (set MONGODB_URI for Atlas)')
   await loadSettings()
+}
+
+/* Connect once, memoised. Reused by src/server.js at boot and by the Vercel
+ * function on every request. */
+function connect() {
+  if (!connectionPromise) {
+    connectionPromise = openConnection().catch((err) => {
+      /* Drop the rejected memo so a later request (or the next cold start)
+       * gets a genuine retry instead of replaying this failure forever. */
+      connectionPromise = null
+      throw err
+    })
+  }
+  return connectionPromise
+}
+
+/** Guard called at the top of every serverless request. Returns immediately
+ *  once the pool is live, and re-opens it if Atlas dropped us while the
+ *  container was idle (readyState !== 1). */
+function ensureConnected() {
+  if (mongoose.connection.readyState === 1) return Promise.resolve()
+  return connect()
 }
 
 async function nextId(key, pad = 6) {
@@ -182,4 +244,4 @@ function getSettings() { return SETTINGS }
 
 const uploadsDir = path.join(__dirname, '..', '..', 'data', 'uploads')
 
-module.exports = { connect, nextId, loadSettings, setSettings, getSettings, uploadsDir, SettingModel, CounterModel }
+module.exports = { connect, ensureConnected, nextId, loadSettings, setSettings, getSettings, uploadsDir, SettingModel, CounterModel }

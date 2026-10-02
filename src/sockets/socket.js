@@ -3,12 +3,17 @@
  * admins a live "who is online" presence view.
  *
  * Runs in two modes:
- *  • Local (src/server.js): init(httpServer) attaches the hub to a real server.
- *  • Vercel (api/index.js): the hub is built without an http server and the
- *    lambda proxy injects each /socket.io/ upgrade request via io.handleUpgrade.
+ *  • Local (src/server.js): init(httpServer) attaches the hub to a real server,
+ *    and realtime works.
+ *  • Vercel (api/index.js): the hub is built but NEVER receives a connection.
+ *    WebSockets are not available to /api filesystem functions on Vercel (the
+ *    beta support requires a custom `server.listen()` entrypoint, not an /api
+ *    function), so `attach()` is best-effort and every emit here is a no-op.
+ *    This is not fatal: the API, Web Push (push.service) and persisted
+ *    notifications all keep working — clients just refetch instead of being
+ *    pushed to. Deploy a separate long-lived host + REDIS_URL to re-enable it.
  * When REDIS_URL is set, the Redis adapter fans broadcasts across instances
- * and presence moves to Redis (required on serverless — each connection is
- * pinned to a different function instance). */
+ * and presence moves to Redis (required once realtime is hosted properly). */
 const jwt = require('jsonwebtoken')
 const { config } = require('../config/env')
 
@@ -196,20 +201,30 @@ function emit(role, event, payload, toUser) {
 
 /** Convenience: broadcast activity + push a role notification in real time. */
 function broadcastActivity({ patientId, time, what, meta, dept, green }, targetRole, actor) {
-  if (!io) return
   const evt = { patientId, time, what, meta, dept, green }
+  const shouldPush = targetRole && targetRole !== actor
+
+  /* Web Push first, and independent of Socket.IO. It is the only channel that
+   * reaches staff with the tab closed, and it must keep working on deployments
+   * where no realtime hub exists (see the header note). The `if (!io) return`
+   * that used to sit at the top of this function silently swallowed the push
+   * below whenever the hub was absent. */
+  if (shouldPush) {
+    require('../services/push.service').pushToRoles(
+      [targetRole, 'Super Admin', 'Hospital Administrator'],
+      { title: `Kebbi Clinic — ${targetRole}`, body: `${dept}: ${what}`, url: '/dashboard' },
+    )
+  }
+
+  if (!io) return
   /* Staff in the same dept + admins see the event in real time. */
   io.to(dept).emit('activity.new', evt)
   io.to('Super Admin').emit('activity.new', evt)
   io.to('Hospital Administrator').emit('activity.new', evt)
-  /* Targeted notification to the relevant role. */
-  if (targetRole && targetRole !== actor) {
-    const text = `${dept}: ${what}`
-    const notif = { role: targetRole, text, at: time, read: false }
+  if (shouldPush) {
+    const notif = { role: targetRole, text: `${dept}: ${what}`, at: time, read: false }
     io.to(targetRole).emit('notification', notif)
     io.to('Super Admin').emit('notification', notif)
-    /* Same alert out-of-browser via Web Push (fire-and-forget). */
-    require('../services/push.service').pushToRoles([targetRole, 'Super Admin', 'Hospital Administrator'], { title: `Kebbi Clinic — ${targetRole}`, body: text, url: '/dashboard' })
   }
 }
 
