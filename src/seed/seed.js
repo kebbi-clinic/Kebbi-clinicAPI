@@ -74,6 +74,11 @@ async function seed() {
     paymentMethods: ['Wallet', 'Cash', 'Transfer', 'POS'],
     rolePermissions: DEFAULT_ROLE_PERMISSIONS,
     counters: { ...initCounters },
+    /* Charged to the patient's wallet when a Records Officer activates them.
+       Set to 0 to activate without a charge. Edited in the admin console. */
+    activationFee: 2000,
+    defaultNightlyRate: 5000,
+    schemaVersion: 2,
   }
   await SettingModel.deleteOne({})
   await SettingModel.create(s)

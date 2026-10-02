@@ -2,15 +2,41 @@
  * one patient (KBC-XXXXXX) → many visits. Returning patients never get re-registered. */
 const { PatientModel, VisitModel, VitalModel, InvestigationModel, PrescriptionModel,
         PaymentModel, AdmissionModel, WalletTxModel, ActivityModel, AuditModel, clean } = require('../models')
-const { nextId } = require('../config/db')
+const { nextId, getSettings } = require('../config/db')
 const { now } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { notify } = require('./notification.service')
 const { broadcastActivity } = require('../sockets/socket')
 const emailService = require('./email.service')
+const { INACTIVE_VIEW_ROLES, ACTIVATE_ROLES } = require('../constants')
 
-async function list() {
-  const rows = await PatientModel.find().sort('-registeredAt')
+const ADMIN_ROLES = ['Super Admin', 'Hospital Administrator']
+
+/** May this role see patients who are currently Inactive? Only the accountant
+ *  and the records officer do — clinical staff work from the active list. */
+function canSeeInactive(role) {
+  return ADMIN_ROLES.includes(role) || INACTIVE_VIEW_ROLES.includes(role)
+}
+
+/** May this role activate a patient? */
+function canActivate(role) {
+  return ADMIN_ROLES.includes(role) || ACTIVATE_ROLES.includes(role)
+}
+
+/** Patient list scoped to the caller's role. `?status=` forces a specific
+ *  status (admins may pass status=Inactive; clinical roles are refused it). */
+async function list(role, status) {
+  const query = {}
+  if (status === 'Active' || status === 'Inactive') {
+    if (status === 'Inactive' && !canSeeInactive(role)) {
+      const err = new Error('Your role may only view active patients. Inactive patients are visible to the Records Officer and the Accountant.')
+      err.status = 403; throw err
+    }
+    query.status = status
+  } else if (!canSeeInactive(role)) {
+    query.status = { $ne: 'Inactive' }
+  }
+  const rows = await PatientModel.find(query).sort('-registeredAt')
   return rows.map(clean)
 }
 
@@ -133,10 +159,90 @@ async function startVisit(id, actor) {
 async function setStatus(id, status, actor) {
   const patient = await PatientModel.findById(id)
   if (!patient) throw notFound('Patient not found')
+
+  /* Activating is a records action and is charged to the patient's wallet. */
+  if (status === 'Active') return activate(patient, actor)
+
+  if (patient.status === status) return clean(patient)
   patient.status = status
   await patient.save()
   await audit(actor.name, `Patient ${patient.status}`, patient.id, 'Records')
   return clean(patient)
 }
 
-module.exports = { list, register, get360, getBasic, startVisit, setStatus }
+/**
+ * Activate a patient — Records Officer only (the route enforces the
+ * `patients.activate` capability). The configured activation fee is deducted
+ * from the patient's wallet, with a matching wallet-ledger row and a paid
+ * payment record, so the money is always accounted for. The patient is then
+ * pushed onto the nurses' "new patients" queue.
+ */
+async function activate(patientOrId, actor) {
+  const patient = typeof patientOrId === 'string'
+    ? await PatientModel.findById(patientOrId)
+    : patientOrId
+  if (!patient) throw notFound('Patient not found')
+
+  if (patient.status === 'Active') {
+    return { ...clean(patient), activationFee: 0, alreadyActive: true }
+  }
+
+  const fee = Number(getSettings()?.activationFee) || 0
+  const balance = Number(patient.wallet) || 0
+  if (fee > 0 && balance < fee) {
+    const err = new Error(
+      `Cannot activate ${patient.id}: the activation fee is ₦${fee.toLocaleString()} but the wallet holds only ₦${balance.toLocaleString()}. Fund the wallet first.`,
+    )
+    err.status = 400
+    throw err
+  }
+
+  const at = now()
+  patient.status = 'Active'
+  patient.activatedAt = at
+  patient.activatedBy = actor.name
+  if (fee > 0) patient.wallet = balance - fee
+  await patient.save()
+
+  /* The wallet ledger and the revenue record for the activation charge. */
+  if (fee > 0) {
+    const wtxId = await nextId('wallet')
+    await WalletTxModel.create({
+      _id: wtxId, id: wtxId,
+      patientId: patient.id, type: 'Debit', amount: fee,
+      reason: 'Patient activation', method: 'Wallet',
+      staff: actor.name, at, balanceAfter: patient.wallet,
+    })
+    const pay = new PaymentModel({
+      _id: await nextId('payment'), id: '', ref: '',
+      patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
+      amount: fee, method: 'Wallet', service: 'Patient activation',
+      staff: actor.name, at, status: 'Paid',
+    })
+    pay.id = pay._id
+    await pay.save()
+  }
+
+  const text = fee > 0
+    ? `Patient activated - activation fee ₦${fee.toLocaleString()} taken from wallet`
+    : 'Patient activated'
+  await ActivityModel.create({
+    patientId: patient.id, time: at, what: text,
+    meta: `Records - ${actor.name}`, dept: 'Records', green: true,
+  })
+  broadcastActivity(
+    { patientId: patient.id, time: at, what: text, meta: `Records - ${actor.name}`, dept: 'Records', green: true },
+    'Nurse', actor.name,
+  )
+  /* Nurses pick the patient up from their dashboard "new patients" queue. */
+  await notify('Nurse', `New patient activated: ${patient.firstName} ${patient.surname} (${patient.id}) — ready for vitals.`)
+  await audit(actor.name, 'Activated patient', patient.id, 'Records',
+    fee > 0 ? `Activation fee ₦${fee.toLocaleString()} charged to wallet` : undefined)
+
+  return { ...clean(patient), activationFee: fee, alreadyActive: false }
+}
+
+module.exports = {
+  list, register, get360, getBasic, startVisit, setStatus, activate,
+  canSeeInactive, canActivate,
+}

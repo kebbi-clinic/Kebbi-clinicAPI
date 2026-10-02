@@ -7,6 +7,14 @@ const SettingSchema = new mongoose.Schema({
   paymentMethods: [{ type: String }],
   rolePermissions: { type: Object, default: {} },
   counters: { type: Object, default: {} },
+  /* Charged to the patient's wallet the moment a Records Officer activates
+     them. 0 disables the charge. Configurable in the admin console. */
+  activationFee: { type: Number, default: 0 },
+  /* Default nightly bed charge used to pre-fill a new admission. */
+  defaultNightlyRate: { type: Number, default: 0 },
+  /* Bumped whenever new settings/permission fields are introduced, so the
+     one-time upgrade in config/db.js runs exactly once on existing databases. */
+  schemaVersion: { type: Number, default: 0 },
 }, { collection: '_settings' })
 
 const SettingModel = mongoose.model('_Setting', SettingSchema)

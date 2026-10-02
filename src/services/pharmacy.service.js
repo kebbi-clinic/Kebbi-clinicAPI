@@ -20,41 +20,76 @@ async function dispense(id, body, actor) {
   if (!rx) {
     const err = new Error('Prescription not found'); err.status = 404; throw err
   }
-  rx.status = 'Dispensed'
-  await rx.save()
+  if (rx.status === 'Dispensed') {
+    const err = new Error(`${rx.id} has already been dispensed`); err.status = 409; throw err
+  }
   const patient = await PatientModel.findById(rx.patientId)
-  const total = rx.items.reduce((s, x) => s + x.price * x.qty, 0)
+  if (!patient) {
+    const err = new Error('Patient not found'); err.status = 404; throw err
+  }
+  const items = rx.items || []
+  const total = items.reduce((s, x) => s + (Number(x.price) || 0) * (Number(x.qty) || 0), 0)
 
-  let pay
-  if (patient.wallet >= total) {
-    patient.wallet -= total
+  /* The pharmacist may dispense a subset of the lines; only the dispensed lines
+     are billed. Falls back to the whole prescription when no selection is sent. */
+  const selected = Array.isArray(body.items) && body.items.length ? body.items : null
+  const picked = (it) => !selected || selected.some((s) => s.drugId === it.drugId)
+  const billedItems = items.filter(picked)
+  const billedTotal = billedItems.reduce((s, x) => s + (Number(x.price) || 0) * (Number(x.qty) || 0), 0)
+
+  /* Stock comes off the shelf for every line actually handed over. */
+  const drugs = await DrugModel.find()
+  const shortages = []
+  for (const it of billedItems) {
+    const drug = drugs.find((d) => d.id === it.drugId)
+    if (!drug) continue
+    if (drug.stock < it.qty) shortages.push(`${drug.name} (need ${it.qty}, in stock ${drug.stock})`)
+    else { drug.stock -= Number(it.qty) || 0; await drug.save() }
+  }
+
+  rx.status = 'Dispensed'
+  rx.dispensedBy = actor.name
+  rx.dispensedAt = now()
+  await rx.save()
+
+  /* The cost is always taken from the wallet first. Whatever the wallet cannot
+     cover stays outstanding as a pending payment for the accountant — the
+     prescription is never marked dispensed with money unaccounted for. */
+  const method = body.method || 'Wallet'
+  const balance = Number(patient.wallet) || 0
+  const debited = Math.min(balance, billedTotal)
+  const shortfall = billedTotal - debited
+  if (debited > 0) {
+    patient.wallet = balance - debited
     await patient.save()
-    pay = new PaymentModel({
-      _id: await nextId('payment'), id: '',
-      ref: '', patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
-      amount: total, method: 'Wallet', service: `Dispensed ${rx.id}`, staff: actor.name, at: now(), status: 'Paid',
-    })
-    pay.id = pay._id
-    await pay.save()
     const wtxId = await nextId('wallet')
     await WalletTxModel.create({
       _id: wtxId, id: wtxId,
-      patientId: patient.id, type: 'Debit', amount: total, reason: `Dispensed ${rx.id}`, method: 'Wallet', staff: actor.name, at: now(), balanceAfter: patient.wallet,
+      patientId: patient.id, type: 'Debit', amount: debited,
+      reason: `Dispensed ${rx.id}`, method: 'Wallet',
+      staff: actor.name, at: now(), balanceAfter: patient.wallet,
     })
-  } else {
-    pay = new PaymentModel({
-      _id: await nextId('payment'), id: '',
-      ref: '', patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
-      amount: total, method: body.method || 'Cash', service: `Dispensed ${rx.id} - pending payment`, staff: 'System', at: now(), status: 'Pending',
-    })
-    pay.id = pay._id
-    await pay.save()
   }
 
-  const text = `Prescription dispensed - ₦${total.toLocaleString()}`
+  const fullyPaid = shortfall <= 0.005
+  const pay = new PaymentModel({
+    _id: await nextId('payment'), id: '',
+    ref: '', patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
+    amount: billedTotal, method: fullyPaid ? 'Wallet' : method,
+    service: `Dispensed ${rx.id}${shortfall > 0.005 ? ' - balance outstanding' : ''}`,
+    staff: fullyPaid ? actor.name : 'System', at: now(),
+    status: fullyPaid ? 'Paid' : 'Pending',
+  })
+  pay.id = pay._id
+  await pay.save()
+  if (!fullyPaid) {
+    await notify('Accountant', `Outstanding on ${rx.id}: ₦${shortfall.toLocaleString()} for ${patient.firstName} ${patient.surname} (${patient.id}).`)
+  }
+
+  const text = `Prescription dispensed - ₦${billedTotal.toLocaleString()}${shortfall > 0.005 ? ' (partly outstanding)' : ''}`
   await ActivityModel.create({ patientId: rx.patientId, time: now(), what: text, meta: `Pharmacy - ${actor.name}`, dept: 'Pharmacy', green: true })
   broadcastActivity({ patientId: rx.patientId, time: now(), what: text, meta: `Pharmacy - ${actor.name}`, dept: 'Pharmacy', green: true }, undefined, actor.name)
-  await audit(actor.name, 'Dispensed prescription', rx.patientId, 'Pharmacy', `${rx.id} - ₦${total.toLocaleString()}`)
+  await audit(actor.name, 'Dispensed prescription', rx.patientId, 'Pharmacy', `${rx.id} - ₦${billedTotal.toLocaleString()}`)
   await notify('Doctor', `Prescription ${rx.id} dispensed for ${patient.firstName} ${patient.surname} (${patient.id})`)
 
   /* Email the receipt when the patient provided an email address. */
@@ -64,10 +99,17 @@ async function dispense(id, body, actor) {
       subject: `Kebbi Clinic receipt — ${rx.id}`,
       title: 'Payment receipt',
       bodyHtml: `<p>Dear ${patient.firstName},</p><p>Prescription <b>${rx.id}</b> has been dispensed.</p>
-        <p><b>Total:</b> ₦${total.toLocaleString()}<br/><b>Method:</b> ${pay.method}<br/><b>Status:</b> ${pay.status}</p>`,
+        <p><b>Total:</b> ₦${billedTotal.toLocaleString()}<br/><b>Taken from wallet:</b> ₦${debited.toLocaleString()}<br/>
+        <b>Outstanding:</b> ₦${shortfall.toLocaleString()}<br/><b>Wallet balance:</b> ₦${patient.wallet.toLocaleString()}</p>`,
     })
   }
-  return { prescription: clean(rx), payment: clean(pay), total, walletBalance: patient.wallet }
+  return {
+    prescription: clean(rx), payment: clean(pay),
+    total: billedTotal, prescriptionTotal: total,
+    debitedFromWallet: debited, outstanding: shortfall,
+    walletBalance: patient.wallet,
+    shortages,
+  }
 }
 
 /* ---- Inventory ---- */

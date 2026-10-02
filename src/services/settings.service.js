@@ -1,12 +1,19 @@
 /* Settings service — the single hospital configuration document. */
 const { SettingModel } = require('../models')
 const { getSettings, setSettings, loadSettings } = require('../config/db')
-const { DEFAULT_ROLE_PERMISSIONS } = require('../constants')
+const { DEFAULT_ROLE_PERMISSIONS, RX_ROUTES, RX_FREQUENCIES } = require('../constants')
 const { now } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { notify } = require('./notification.service')
 
-function get() { return getSettings() }
+/* The catalogue both frontends read. `rxRoutes` / `rxFrequencies` are the fixed
+   clinical vocabulary for prescriptions, so the server and both apps always
+   offer exactly the same dropdown options. */
+function get() {
+  const s = getSettings()
+  if (!s) return s
+  return { ...s, rxRoutes: RX_ROUTES, rxFrequencies: RX_FREQUENCIES }
+}
 
 async function update(body, actor) {
   const existing = await SettingModel.findOne()
@@ -17,6 +24,11 @@ async function update(body, actor) {
     paymentMethods: body.paymentMethods || existing?.paymentMethods || [],
     rolePermissions: body.rolePermissions || existing?.rolePermissions || DEFAULT_ROLE_PERMISSIONS,
     counters: body.counters || existing?.counters || {},
+    /* Money settings — an omitted value keeps the current one so a partial
+       save from the admin console can never silently zero them. */
+    activationFee: body.activationFee !== undefined ? Number(body.activationFee) || 0 : (existing?.activationFee ?? 0),
+    defaultNightlyRate: body.defaultNightlyRate !== undefined ? Number(body.defaultNightlyRate) || 0 : (existing?.defaultNightlyRate ?? 0),
+    schemaVersion: existing?.schemaVersion || 0,
   }
   await SettingModel.deleteOne({})
   await SettingModel.create(updated)
@@ -24,7 +36,7 @@ async function update(body, actor) {
   await loadSettings()
   await audit(actor.name, 'Updated settings', '', 'Administration')
   await notify('Super Admin', `System settings updated by ${actor.name}`)
-  return { ok: true }
+  return { ok: true, activationFee: updated.activationFee, defaultNightlyRate: updated.defaultNightlyRate }
 }
 
 async function updatePermissions(matrix, actor) {

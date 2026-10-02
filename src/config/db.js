@@ -75,6 +75,37 @@ const COUNTERS = {
   patient: 'KBC', visit: 'VIS', vital: 'VIT', investigation: 'INV',
   radiology: 'RDG', prescription: 'RX', admission: 'ADM', payment: 'PAY',
   wallet: 'WTX', drug: 'DRG', staff: 'STF',
+  service: 'SVC', procedure: 'PRC',
+}
+
+/* Bump when new settings fields or capabilities are introduced. Databases with a
+ * lower schemaVersion are upgraded once at boot (see upgradeSettings) so an
+ * already-seeded install picks up the new capabilities instead of silently
+ * denying every request that needs them. */
+const SETTINGS_SCHEMA_VERSION = 2
+
+/* One-time upgrade of the stored settings document:
+ *  · add the capabilities introduced since the database was seeded, keeping any
+ *    capability an administrator has deliberately edited,
+ *  · add the new activationFee / defaultNightlyRate fields. */
+async function upgradeSettings(doc) {
+  const { DEFAULT_ROLE_PERMISSIONS, CAPS } = require('../constants')
+  const matrix = { ...DEFAULT_ROLE_PERMISSIONS, ...(doc.rolePermissions || {}) }
+  for (const role of Object.keys(matrix)) {
+    const entry = matrix[role] || {}
+    const can = Array.isArray(entry.can) ? entry.can.filter((c) => CAPS[c]) : []
+    const cannot = Array.isArray(entry.cannot) ? entry.cannot.filter((c) => CAPS[c]) : []
+    const defaults = DEFAULT_ROLE_PERMISSIONS[role]?.can || []
+    /* Union so a capability the role is entitled to by default is never lost,
+       while `cannot` keeps winning in can(). */
+    matrix[role] = { can: [...new Set([...defaults, ...can])], cannot: [...new Set(cannot)] }
+  }
+  doc.rolePermissions = matrix
+  if (doc.activationFee === undefined || doc.activationFee === null) doc.activationFee = 0
+  if (doc.defaultNightlyRate === undefined || doc.defaultNightlyRate === null) doc.defaultNightlyRate = 0
+  doc.schemaVersion = SETTINGS_SCHEMA_VERSION
+  await doc.save()
+  console.log('[db] settings upgraded to schema version', SETTINGS_SCHEMA_VERSION)
 }
 
 let SETTINGS = null // in-memory cache of the _settings doc (lives behind getSettings())
@@ -130,12 +161,19 @@ async function nextId(key, pad = 6) {
 }
 
 async function loadSettings() {
-  const s = await SettingModel.findOne().lean()
+  let s = await SettingModel.findOne()
+  /* Upgrade an existing database in place before caching it. */
+  if (s && (s.schemaVersion || 0) < SETTINGS_SCHEMA_VERSION) {
+    try { await upgradeSettings(s) } catch (e) { console.warn('[db] settings upgrade failed:', e.message) }
+  }
   if (!s) { SETTINGS = null; return }
+  s = await SettingModel.findOne()
   SETTINGS = {
     hospital: s.hospital, investigationTypes: s.investigationTypes,
     drugCategories: s.drugCategories, paymentMethods: s.paymentMethods,
     rolePermissions: s.rolePermissions, counters: s.counters,
+    activationFee: s.activationFee || 0,
+    defaultNightlyRate: s.defaultNightlyRate || 0,
   }
 }
 

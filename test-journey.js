@@ -1,5 +1,7 @@
 /* End-to-end test of the spec §40 patient journey against the running backend. */
-const BASE = 'http://localhost:4000'
+/* Defaults to the same port as the backend's .env (7227) so this always points
+   at the server that is actually running — override with PORT=… if needed. */
+const BASE = `http://localhost:${process.env.PORT || 7227}`
 const users = {
   records: ['records_officer', 'password', 'hospital'],
   nurse: ['nurse_aisha', 'password', 'hospital'],
