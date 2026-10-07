@@ -154,10 +154,78 @@ async function listForPatient(patientId) {
   return [...(patient.procedures || [])].reverse().map(clean)
 }
 
+/**
+ * Procedure / service inventory: the catalogue with how often each entry has
+ * actually been performed and billed.
+ *
+ * `quantity` is the number of times the procedure appears on a patient's
+ * permanent record; `amount` is the catalogue price; `total` is amount × quantity
+ * (what the hospital has charged for it so far). Procedures that were performed
+ * but whose catalogue entry has since been removed still report, keyed by name,
+ * so historical billing never disappears from the accountant's view.
+ *
+ * Readable by every authenticated staff member — the accountant reads it for
+ * revenue, doctors and nurses read it to see what they can record.
+ */
+async function inventory() {
+  const [services, patients] = await Promise.all([
+    ServiceModel.find().sort('name'),
+    PatientModel.find({ 'procedures.0': { $exists: true } }).select('procedures'),
+  ])
+
+  const qty = new Map()     // key -> times performed
+  const billed = new Map()  // key -> money actually charged
+  for (const p of patients) {
+    for (const pr of (p.procedures || [])) {
+      const key = pr.serviceId || `name:${pr.name}`
+      qty.set(key, (qty.get(key) || 0) + 1)
+      billed.set(key, (billed.get(key) || 0) + (Number(pr.amount) || 0))
+    }
+  }
+
+  const rows = []
+  const seen = new Set()
+  for (const s of services) {
+    const key = s.id
+    const quantity = qty.get(key) || 0
+    seen.add(key)
+    const amount = Number(s.amount) || 0
+    rows.push({
+      id: s.id, procedure: s.name, name: s.name, category: s.category,
+      department: s.department, active: s.active !== false,
+      amount, quantity, total: amount * quantity,
+      billed: billed.get(key) || 0,
+    })
+  }
+  /* Performed procedures whose catalogue entry was deleted or renamed. */
+  for (const [key, quantity] of qty) {
+    if (seen.has(key)) continue
+    const name = key.startsWith('name:') ? key.slice(5) : key
+    const billedAmount = billed.get(key) || 0
+    rows.push({
+      id: key, procedure: name, name, category: 'Archived', department: 'General',
+      active: false, amount: quantity ? Math.round(billedAmount / quantity) : 0,
+      quantity, total: billedAmount, billed: billedAmount,
+    })
+  }
+
+  rows.sort((a, b) => a.procedure.localeCompare(b.procedure))
+  return {
+    items: rows,
+    totals: {
+      procedures: rows.length,
+      quantity: rows.reduce((t, r) => t + r.quantity, 0),
+      amount: rows.reduce((t, r) => t + r.amount, 0),
+      total: rows.reduce((t, r) => t + r.total, 0),
+      billed: rows.reduce((t, r) => t + r.billed, 0),
+    },
+  }
+}
+
 /* The activation fee charged to a patient's wallet when they are activated.
    Read from settings so the admin console controls it; 0 disables the charge. */
 function activationFee() {
   return Number(getSettings()?.activationFee) || 0
 }
 
-module.exports = { list, create, update, perform, listForPatient, activationFee }
+module.exports = { list, create, update, perform, listForPatient, inventory, activationFee }

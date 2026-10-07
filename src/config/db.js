@@ -236,6 +236,8 @@ async function loadSettings() {
     rolePermissions: s.rolePermissions, counters: s.counters,
     activationFee: s.activationFee || 0,
     defaultNightlyRate: s.defaultNightlyRate || 0,
+    /* Test name -> price. Empty object means "use the built-in defaults". */
+    investigationPrices: s.investigationPrices || {},
   }
 }
 

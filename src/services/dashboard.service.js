@@ -134,6 +134,16 @@ async function roleDashboard(role) {
     stats.funding = sum(walletTxs.filter((t) => t.type === 'Credit' && String(t.at).startsWith(dayStr)))
     out.txs = walletTxs.sort(byTimeDesc('at')).slice(0, 30)
       .map((t) => ({ ...t, patientName: nameOf(byId.get(t.patientId)) }))
+
+    /* Procedure / amount / quantity inventory, so the dashboard can render its
+       Inventory card without a second round-trip. Same payload as
+       GET /api/services/inventory. */
+    try {
+      out.procedureInventory = await require('./service.service').inventory()
+    } catch (e) {
+      /* Never take the whole dashboard down over the inventory card. */
+      out.procedureInventory = { items: [], totals: { procedures: 0, quantity: 0, amount: 0, total: 0, billed: 0 } }
+    }
   }
 
   return out

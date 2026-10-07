@@ -57,7 +57,35 @@ const ACTIVATE_ROLES = ['Records Officer']
 const RX_ROUTES = ['IV', 'IM', 'Oral', 'Rectal']
 const RX_FREQUENCIES = ['Daily', 'BD', 'TDS', 'Noctal', 'PRN', '4hrly', '6hrly', '8hrly', '12hrly', '24hrly']
 
+/* Price list for laboratory / radiology investigations.
+ *
+ * `settings.investigationTypes` is only a list of NAMES — it has never carried a
+ * price, which is why consultations saved every request at ₦0 and the laboratory
+ * had nothing to take from the patient's wallet. These are the defaults; an
+ * administrator overrides any of them (or adds new tests) through
+ * `settings.investigationPrices`, a map of test name -> amount. */
+const DEFAULT_INVESTIGATION_PRICES = {
+  'PCV': 800,
+  'FBC': 3500,
+  'S/U/C': 2500,
+  'Urinalysis': 900,
+  'RBS': 1000,
+  'Pregnancy Test': 1500,
+  'Urine MCS': 3000,
+  'Swab MCS': 3000,
+  'HCV': 2500,
+  'RVS': 2000,
+  'VDRL': 2000,
+  'FBS': 1200,
+  'HBsAg': 2500,
+  'Malaria Parasite (MP)': 1500,
+  'HbA1c': 7500,
+  'Chest X-Ray (PA)': 6000,
+  'Chest X-ray': 6000,
+  'Abdominal Ultrasound': 8000,
+}
+
 module.exports = {
   ROLES, CAPS, DEFAULT_ROLE_PERMISSIONS, INACTIVE_VIEW_ROLES, ACTIVATE_ROLES,
-  RX_ROUTES, RX_FREQUENCIES,
+  RX_ROUTES, RX_FREQUENCIES, DEFAULT_INVESTIGATION_PRICES,
 }

@@ -12,6 +12,10 @@ const SettingSchema = new mongoose.Schema({
   activationFee: { type: Number, default: 0 },
   /* Default nightly bed charge used to pre-fill a new admission. */
   defaultNightlyRate: { type: Number, default: 0 },
+  /* Test name -> price (₦). Consultation stamps this onto each investigation so
+     the laboratory knows what to take from the patient's wallet when the result
+     is submitted. Falls back to DEFAULT_INVESTIGATION_PRICES for new tests. */
+  investigationPrices: { type: Object, default: {} },
   /* Bumped whenever new settings/permission fields are introduced, so the
      one-time upgrade in config/db.js runs exactly once on existing databases. */
   schemaVersion: { type: Number, default: 0 },

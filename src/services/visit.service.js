@@ -7,17 +7,24 @@ const { now } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { broadcastActivity } = require('../sockets/socket')
 const { notify } = require('./notification.service')
+const { priceFor } = require('./settings.service')
 
-/* Investigations may arrive as strings ("FBC") or objects ({ test, dept, price }),
- * with an optional invDept map — accept all three for frontend compatibility. */
+/* Investigations arrive from the Consultation screen as plain test names
+ * ("FBC") or as objects ({ test, dept, price }), with an optional invDept map —
+ * accept all three for frontend compatibility.
+ *
+ * The price is resolved here, once, at request time: it is stamped onto the
+ * investigation and never changes again, so later edits to the price list can
+ * never rewrite what a patient was already billed. */
 function normaliseInvestigations(raw, invDept) {
   if (!Array.isArray(raw)) return []
   return raw.map((t) => {
     if (typeof t === 'string') {
-      return { test: t, dept: invDept?.[t] || 'Lab', price: 0 }
+      return { test: t, dept: invDept?.[t] || 'Lab', price: priceFor(t) }
     }
     return {
-      test: t.test, dept: t.dept || invDept?.[t.test] || 'Lab', price: t.price || 0,
+      test: t.test, dept: t.dept || invDept?.[t.test] || 'Lab',
+      price: priceFor(t.test, t.price),
     }
   }).filter((t) => t.test)
 }
@@ -120,17 +127,28 @@ async function completeConsultation(visitId, body, actor) {
   if (!visit) {
     const err = new Error('Visit not found'); err.status = 404; throw err
   }
+  const isRevisit = !!visit.consultation
   visit.consultation = {
     complaint: body.complaint || '', history: body.history || '', exam: body.exam || '',
     diagnosis: body.diagnosis || '', doctor: actor.name, at: now(),
   }
   visit.consultationItems = body.items || body.rx || []
   visit.diagnosis = body.diagnosis || ''
+  /* Close the visit once it has been seen. Before this the visit stayed
+     "Open"/"Waiting" forever, so it kept showing up as a pending consultation
+     and the patient could be billed again on every re-save. An admission
+     overwrites this with "Admitted" further down. */
+  visit.status = 'Completed'
   await visit.save()
 
-  /* Create investigations */
+  /* Create investigations — but only the first time round. Re-opening a saved
+     consultation must not queue the same tests twice (which would charge the
+     patient twice), so anything already raised for this visit is left alone. */
   const invs = normaliseInvestigations(body.investigations, body.invDept)
-  if (invs.length) {
+  const alreadyRequested = isRevisit
+    ? await InvestigationModel.countDocuments({ visitId: visit.id })
+    : 0
+  if (invs.length && !alreadyRequested) {
     const created = []
     for (const t of invs) {
       const inv = new InvestigationModel({
@@ -158,9 +176,14 @@ async function completeConsultation(visitId, body, actor) {
     }
   }
 
-  /* Create prescription (accepts `items` or legacy `rx`; uses live pharmacy prices) */
+  /* Create prescription (accepts `items` or legacy `rx`; uses live pharmacy prices).
+     Guarded like the investigations above: re-saving a consultation must not put
+     the same drugs on the pharmacy queue a second time. */
   const rxItems = Array.isArray(body.items) && body.items.length ? body.items : (body.rx || [])
-  if (Array.isArray(rxItems) && rxItems.length) {
+  const alreadyPrescribed = isRevisit
+    ? await PrescriptionModel.countDocuments({ visitId: visit.id })
+    : 0
+  if (Array.isArray(rxItems) && rxItems.length && !alreadyPrescribed) {
     const drugs = await DrugModel.find()
     const pricedItems = rxItems.filter((it) => it && it.drugId && Number(it.qty) > 0).map((it) => {
       const drug = drugs.find((d) => d.id === it.drugId)
@@ -186,6 +209,10 @@ async function completeConsultation(visitId, body, actor) {
       const patient = await PatientModel.findById(visit.patientId)
       if (patient) rx.patientName = `${patient.firstName} ${patient.surname}`
       await rx.save()
+      /* Persisted notification as well as the live fan-out — otherwise a
+         pharmacist who is offline when the doctor prescribes never learns the
+         prescription exists and it sits unactioned on their queue. */
+      await notify('Pharmacist', `New prescription ${rx.id} for ${rx.patientName || visit.patientId} (${visit.id}) — ₦${total.toLocaleString()}`)
       await broadcastActivity(
         { patientId: visit.patientId, time: now(), what: `Prescription created (₦${total.toLocaleString()})`, meta: `Pharmacy - ${actor.name}`, dept: 'Pharmacy', green: true },
         'Pharmacist', actor.name,

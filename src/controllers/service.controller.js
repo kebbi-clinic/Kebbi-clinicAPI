@@ -8,3 +8,4 @@ exports.create = asyncHandler(async (req, res) => res.status(201).json(await ser
 exports.update = asyncHandler(async (req, res) => res.json(await serviceService.update(req.params.id, req.body, req.user)))
 exports.perform = asyncHandler(async (req, res) => res.status(201).json(await serviceService.perform(req.body, req.user)))
 exports.forPatient = asyncHandler(async (req, res) => res.json(await serviceService.listForPatient(req.params.patientId)))
+exports.inventory = asyncHandler(async (req, res) => res.json(await serviceService.inventory()))

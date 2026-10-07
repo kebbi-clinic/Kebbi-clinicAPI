@@ -9,6 +9,10 @@ router.use(requireAuth)
 
 /* Reading the catalogue: every authenticated staff member may see it. */
 router.get('/', controller.list)
+/* Procedure/amount/quantity inventory — accountant, doctors and nurses all read
+   the same list, so it is deliberately not capability-gated. Registered BEFORE
+   `/patient/:patientId` so "inventory" is never captured as a patient id. */
+router.get('/inventory', controller.inventory)
 router.get('/patient/:patientId', controller.forPatient)
 /* Performing a service is a nursing / doctor action and bills the patient. */
 router.post('/perform', requirePerm('services.record'), validate(performService), controller.perform)
