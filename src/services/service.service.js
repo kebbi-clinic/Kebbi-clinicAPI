@@ -32,6 +32,7 @@ async function create(body, actor) {
     name: body.name,
     category: body.category || 'Procedure',
     amount: Number(body.amount) || 0,
+    quantity: Number(body.quantity) || 1,
     department: body.department || 'General',
     notes: body.notes || '',
     active: body.active === undefined ? true : !!body.active,
@@ -39,8 +40,11 @@ async function create(body, actor) {
   })
   service.id = service._id
   await service.save()
-  await audit(actor.name, 'Created procedure/service', service.name, 'Administration', `₦${service.amount.toLocaleString()}`)
-  await notify('Super Admin', `${actor.name} added the procedure/service "${service.name}" (₦${service.amount.toLocaleString()})`)
+  const total = (Number(service.amount) || 0) * (Number(service.quantity) || 1)
+  await audit(actor.name, 'Created procedure/service', service.name, 'Administration',
+    `${service.quantity} × ₦${Number(service.amount).toLocaleString()} = ₦${total.toLocaleString()}`)
+  await notify('Super Admin',
+    `${actor.name} added the procedure/service "${service.name}" (${service.quantity} × ₦${Number(service.amount).toLocaleString()})`)
   const io = getIo()
   if (io) io.emit('services.changed', clean(service))
   return clean(service)
@@ -49,24 +53,42 @@ async function create(body, actor) {
 async function update(id, body, actor) {
   const service = await ServiceModel.findById(id)
   if (!service) throw notFound('Procedure/service not found')
-  const before = service.amount
+  const beforeAmount = Number(service.amount) || 0
+  const beforeQty = Number(service.quantity) || 1
   if (body.name !== undefined) service.name = body.name
   if (body.category !== undefined) service.category = body.category
   if (body.department !== undefined) service.department = body.department
   if (body.notes !== undefined) service.notes = body.notes
   if (body.amount !== undefined) service.amount = Number(body.amount) || 0
+  if (body.quantity !== undefined) service.quantity = Math.max(1, Number(body.quantity) || 1)
   if (body.active !== undefined) service.active = !!body.active
   service.updatedAt = now()
   await service.save()
-  if (before !== service.amount) {
-    await audit(actor.name, 'Updated procedure/service price', service.name, 'Administration',
-      `₦${Number(before).toLocaleString()} -> ₦${service.amount.toLocaleString()}`)
+
+  const priceChanged = beforeAmount !== service.amount
+  const qtyChanged = beforeQty !== service.quantity
+  if (priceChanged || qtyChanged) {
+    await audit(actor.name, 'Updated procedure/service', service.name, 'Administration',
+      `${beforeQty} × ₦${beforeAmount.toLocaleString()} → ${service.quantity} × ₦${Number(service.amount).toLocaleString()}`)
   } else {
     await audit(actor.name, 'Updated procedure/service', service.name, 'Administration')
   }
   const io = getIo()
   if (io) io.emit('services.changed', clean(service))
   return clean(service)
+}
+
+/** Permanently delete a procedure from the catalogue. Historic patient records
+ *  that reference it are untouched — only the catalogue entry is removed. */
+async function remove(id, actor) {
+  const service = await ServiceModel.findById(id)
+  if (!service) throw notFound('Procedure/service not found')
+  await ServiceModel.deleteOne({ _id: id })
+  await audit(actor.name, 'Deleted procedure/service', service.name, 'Administration',
+    `${service.quantity} × ₦${Number(service.amount).toLocaleString()}`)
+  const io = getIo()
+  if (io) io.emit('services.changed', { id, deleted: true })
+  return { id, deleted: true }
 }
 
 /* Record a procedure/service performed on a patient and bill for it. */
@@ -77,7 +99,9 @@ async function perform(body, actor) {
   if (!service) throw notFound('Procedure/service not found')
   if (service.active === false) throw new Error(`"${service.name}" is no longer an active service`)
 
-  const amount = Number(service.amount) || 0
+  const unit = Number(service.amount) || 0
+  const qty = Math.max(1, Number(body.qty) || Number(service.quantity) || 1)
+  const amount = unit * qty
   const settle = body.settle || 'Wallet'
   const entryId = await nextId('procedure')
   const at = now()
@@ -89,7 +113,7 @@ async function perform(body, actor) {
   if (settle === 'Wallet' && amount > 0) {
     if (balanceAfter < amount) {
       const err = new Error(
-        `Insufficient wallet balance. "${service.name}" costs ₦${amount.toLocaleString()} but the patient has ₦${balanceAfter.toLocaleString()}. Fund the wallet first or settle by another method.`,
+        `Insufficient wallet balance. ${qty} × "${service.name}" costs ₦${amount.toLocaleString()} but the patient has ₦${balanceAfter.toLocaleString()}. Fund the wallet first or settle by another method.`,
       )
       err.status = 400
       throw err
@@ -101,19 +125,20 @@ async function perform(body, actor) {
   }
 
   patient.procedures.push({
-    id: entryId, serviceId: service.id, name: service.name, amount,
+    id: entryId, serviceId: service.id, name: service.name,
+    amount: unit, quantity: qty, total: amount,
     performedBy: actor.name, role: actor.role, at, notes: body.notes || '',
     chargedToWallet,
     paymentStatus: chargedToWallet ? 'Paid' : 'Pending',
   })
   await patient.save()
 
-
   if (amount > 0) {
     const pay = new PaymentModel({
       _id: await nextId('payment'), id: '', ref: '',
       patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
-      amount, method: settle, service: `${service.name} (${entryId})`,
+      amount, method: settle,
+      service: `${service.name}${qty > 1 ? ` ×${qty}` : ''} (${entryId})`,
       staff: actor.name, at, status: chargedToWallet ? 'Paid' : 'Pending',
     })
     pay.id = pay._id
@@ -123,16 +148,17 @@ async function perform(body, actor) {
       await WalletTxModel.create({
         _id: wtxId, id: wtxId,
         patientId: patient.id, type: 'Debit', amount,
-        reason: `${service.name} (${entryId})`, method: 'Wallet',
+        reason: `${service.name}${qty > 1 ? ` ×${qty}` : ''} (${entryId})`, method: 'Wallet',
         staff: actor.name, at, balanceAfter,
       })
     } else {
       /* Outstanding: tell the accountant there is money to collect. */
-      await notify('Accountant', `Payment pending: ${service.name} ₦${amount.toLocaleString()} for ${patient.firstName} ${patient.surname} (${patient.id}) — settle by ${settle}.`)
+      await notify('Accountant',
+        `Payment pending: ${qty} × ${service.name} ₦${amount.toLocaleString()} for ${patient.firstName} ${patient.surname} (${patient.id}) — settle by ${settle}.`)
     }
   }
 
-  const text = `${service.name} performed - ₦${amount.toLocaleString()}${chargedToWallet ? ' (wallet)' : ''}`
+  const text = `${qty > 1 ? `${qty} × ` : ''}${service.name} performed - ₦${amount.toLocaleString()}${chargedToWallet ? ' (wallet)' : ''}`
   await ActivityModel.create({
     patientId: patient.id, time: at, what: text,
     meta: `${actor.role} - ${actor.name}`, dept: actor.role, green: true,
@@ -142,7 +168,7 @@ async function perform(body, actor) {
     undefined, actor.name,
   )
   await audit(actor.name, 'Recorded procedure/service', patient.id, actor.role,
-    `${service.name} - ₦${amount.toLocaleString()}`)
+    `${qty} × ${service.name} - ₦${amount.toLocaleString()}`)
 
   return { procedure: clean(patient.procedures[patient.procedures.length - 1]), walletBalance: balanceAfter }
 }
@@ -158,14 +184,10 @@ async function listForPatient(patientId) {
  * Procedure / service inventory: the catalogue with how often each entry has
  * actually been performed and billed.
  *
- * `quantity` is the number of times the procedure appears on a patient's
- * permanent record; `amount` is the catalogue price; `total` is amount × quantity
- * (what the hospital has charged for it so far). Procedures that were performed
- * but whose catalogue entry has since been removed still report, keyed by name,
- * so historical billing never disappears from the accountant's view.
- *
- * Readable by every authenticated staff member — the accountant reads it for
- * revenue, doctors and nurses read it to see what they can record.
+ * `quantity` counts how many times the procedure appears on a patient's record;
+ * `amount` is the catalogue unit price; `total` is amount × quantity.
+ * Procedures whose catalogue entry has since been deleted still report, keyed
+ * by name, so historic billing never disappears from the accountant's view.
  */
 async function inventory() {
   const [services, patients] = await Promise.all([
@@ -179,7 +201,8 @@ async function inventory() {
     for (const pr of (p.procedures || [])) {
       const key = pr.serviceId || `name:${pr.name}`
       qty.set(key, (qty.get(key) || 0) + 1)
-      billed.set(key, (billed.get(key) || 0) + (Number(pr.amount) || 0))
+      const charged = Number(pr.total) || Number(pr.amount) || 0
+      billed.set(key, (billed.get(key) || 0) + charged)
     }
   }
 
@@ -191,8 +214,7 @@ async function inventory() {
     seen.add(key)
     const amount = Number(s.amount) || 0
     rows.push({
-      id: s.id, procedure: s.name, name: s.name, category: s.category,
-      department: s.department, active: s.active !== false,
+      id: s.id, procedure: s.name, name: s.name,
       amount, quantity, total: amount * quantity,
       billed: billed.get(key) || 0,
     })
@@ -203,8 +225,8 @@ async function inventory() {
     const name = key.startsWith('name:') ? key.slice(5) : key
     const billedAmount = billed.get(key) || 0
     rows.push({
-      id: key, procedure: name, name, category: 'Archived', department: 'General',
-      active: false, amount: quantity ? Math.round(billedAmount / quantity) : 0,
+      id: key, procedure: name, name,
+      amount: quantity ? Math.round(billedAmount / quantity) : 0,
       quantity, total: billedAmount, billed: billedAmount,
     })
   }
@@ -228,4 +250,4 @@ function activationFee() {
   return Number(getSettings()?.activationFee) || 0
 }
 
-module.exports = { list, create, update, perform, listForPatient, inventory, activationFee }
+module.exports = { list, create, update, remove, perform, listForPatient, inventory, activationFee }

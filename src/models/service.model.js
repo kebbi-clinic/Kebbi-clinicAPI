@@ -7,6 +7,7 @@ const ServiceSchema = new mongoose.Schema({
   name: { type: String, required: true },
   category: { type: String, default: 'Procedure' },
   amount: { type: Number, default: 0 },
+  quantity: { type: Number, default: 1 },   
   /* Department expected to perform it — used to group it in the pickers. */
   department: { type: String, default: 'General' },
   notes: String,

@@ -19,5 +19,7 @@ router.post('/perform', requirePerm('services.record'), validate(performService)
 /* Creating and pricing services is an administration action. */
 router.post('/', requirePerm('services.manage'), validate(createService), controller.create)
 router.put('/:id', requirePerm('services.manage'), validate(updateService), controller.update)
+router.delete('/:id', requirePerm('services.manage'), controller.remove)
+
 
 module.exports = router
