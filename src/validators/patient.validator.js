@@ -1,5 +1,5 @@
 /* Validation schemas — patients & visits. */
-const { body, param } = require('express-validator')
+const { body, param, query } = require('express-validator')
 
 const registerPatient = [
   body('firstName').trim().notEmpty().withMessage('First name is required').isLength({ max: 60 }),
@@ -14,6 +14,15 @@ const registerPatient = [
   body('nextOfKin.phone').optional({ values: 'null' }).matches(/^[0-9+\-\s()]{7,20}$/).withMessage('Next-of-kin phone is not valid'),
 ]
 
+const listPatients = [
+  query('status').optional().isIn(['Active', 'Inactive']).withMessage('status must be Active or Inactive'),
+  /* Server-side search (?q=) + paging (?page= ?limit=) so the app can find one
+     patient out of tens of thousands without downloading the whole register. */
+  query('q').optional().isString().isLength({ max: 80 }),
+  query('page').optional().isInt({ min: 1 }).withMessage('page must be 1 or more'),
+  query('limit').optional().isInt({ min: 1, max: 100 }).withMessage('limit must be between 1 and 100'),
+]
+
 const startVisit = [
   param('id').trim().notEmpty().withMessage('Patient id is required'),
 ]
@@ -23,4 +32,4 @@ const patientStatus = [
   body('status').isIn(['Active', 'Inactive']).withMessage('Status must be Active or Inactive'),
 ]
 
-module.exports = { registerPatient, startVisit, patientStatus }
+module.exports = { registerPatient, listPatients, startVisit, patientStatus }

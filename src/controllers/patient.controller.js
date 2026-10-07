@@ -2,7 +2,9 @@
 const { asyncHandler } = require('../utils/asyncHandler')
 const patientService = require('../services/patient.service')
 
-exports.list = asyncHandler(async (req, res) => res.json(await patientService.list(req.user.role, req.query.status)))
+exports.list = asyncHandler(async (req, res) => res.json(await patientService.list(req.user.role, {
+  status: req.query.status, q: req.query.q, page: req.query.page, limit: req.query.limit,
+})))
 exports.register = asyncHandler(async (req, res) => res.status(201).json(await patientService.register(req.body, req.user)))
 exports.get = asyncHandler(async (req, res) => res.json(await patientService.getBasic(req.params.id)))
 exports.startVisit = asyncHandler(async (req, res) => res.status(201).json(await patientService.startVisit(req.params.id, req.user)))

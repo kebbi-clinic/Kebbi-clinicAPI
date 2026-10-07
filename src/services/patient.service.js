@@ -24,8 +24,10 @@ function canActivate(role) {
 }
 
 /** Patient list scoped to the caller's role. `?status=` forces a specific
- *  status (admins may pass status=Inactive; clinical roles are refused it). */
-async function list(role, status) {
+ *  status (admins may pass status=Inactive; clinical roles are refused it).
+ *  `?q=` searches server-side by id / name / phone, page by page — the
+ *  hospital app never has to download 30,000 records to pick one. */
+async function list(role, { status, q, page, limit } = {}) {
   const query = {}
   if (status === 'Active' || status === 'Inactive') {
     if (status === 'Inactive' && !canSeeInactive(role)) {
@@ -36,8 +38,24 @@ async function list(role, status) {
   } else if (!canSeeInactive(role)) {
     query.status = { $ne: 'Inactive' }
   }
-  const rows = await PatientModel.find(query).sort('-registeredAt')
-  return rows.map(clean)
+  /* Server-side patient search: every whitespace-separated term must match
+     id / firstName / otherName / surname / phone (same rule as the app's
+     search boxes, enforced in Mongo so 30k patients never cross the wire).
+     `page`/`limit` bound the payload; `total` tells the UI there is more. */
+  const terms = String(q || '').trim().split(/\s+/).filter(Boolean).slice(0, 8)
+  if (terms.length) {
+    query.$and = terms.map((t) => {
+      const rx = new RegExp(escapeRegex(t), 'i')
+      return { $or: [{ id: rx }, { firstName: rx }, { otherName: rx }, { surname: rx }, { phone: rx }] }
+    })
+  }
+  const perPage = Math.min(Math.max(Number(limit) || PATIENT_PAGE, 1), 100)
+  const pageNum = Math.max(Number(page) || 1, 1)
+  const [total, rows] = await Promise.all([
+    PatientModel.countDocuments(query),
+    PatientModel.find(query).sort('-registeredAt').skip((pageNum - 1) * perPage).limit(perPage),
+  ])
+  return { items: rows.map(clean), total, page: pageNum, limit: perPage }
 }
 
 async function register(body, actor) {
@@ -64,6 +82,14 @@ async function register(body, actor) {
   }
   return clean(patient)
 }
+
+/** Escape user text before it goes inside a RegExp. */
+function escapeRegex(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/** Default page size for the patient list/search. */
+const PATIENT_PAGE = 50
 
 function notFound(msg) {
   const err = new Error(msg); err.status = 404
