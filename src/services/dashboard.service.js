@@ -4,11 +4,13 @@ const { PatientModel, StaffModel, VisitModel, PaymentModel, PrescriptionModel,
         InvestigationModel, AdmissionModel, DrugModel, WalletTxModel, AuditModel,
         VitalModel, clean } = require('../models')
 const { getSettings } = require('../config/db')
-const { now, parseWhen, dayPrefix } = require('../utils/datetime')
+const { now, parseWhen, whenMs, dayPrefix } = require('../utils/datetime')
 
 const sum = (rows) => rows.reduce((t, r) => t + (Number(r.amount) || 0), 0)
 const nameOf = (p) => (p ? `${p.firstName || ''} ${p.surname || ''}`.trim() : '')
-const byTimeDesc = (field) => (a, b) => String(b[field] || '').localeCompare(String(a[field] || ''))
+/* Newest-first by the REAL timestamp — a plain string compare puts "02:30 pm"
+ * above "10:20 am", which scrambled the patient queues. */
+const byTimeDesc = (field) => (a, b) => whenMs(b[field]) - whenMs(a[field])
 
 /**
  * Role dashboard.

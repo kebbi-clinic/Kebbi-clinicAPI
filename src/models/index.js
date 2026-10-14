@@ -9,6 +9,7 @@ const AdmissionModel = require('./admission.model')
 const PaymentModel = require('./payment.model')
 const WalletTxModel = require('./wallet-tx.model')
 const DrugModel = require('./drug.model')
+const TestModel = require('./test.model')
 const ServiceModel = require('./service.model')
 const ActivityModel = require('./activity.model')
 const AuditModel = require('./audit.model')
@@ -20,7 +21,7 @@ const { clean, cleanList } = require('../utils/clean')
 module.exports = {
   StaffModel, PatientModel, VisitModel, VitalModel, InvestigationModel,
   PrescriptionModel, AdmissionModel, PaymentModel, WalletTxModel, DrugModel,
-  ServiceModel,
+  TestModel, ServiceModel,
   ActivityModel, AuditModel, NotificationModel, PushSubModel, PushKeyModel,
   SettingModel, CounterModel,
   clean, cleanList,

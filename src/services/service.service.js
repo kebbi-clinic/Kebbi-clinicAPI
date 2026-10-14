@@ -106,40 +106,39 @@ async function perform(body, actor) {
   const entryId = await nextId('procedure')
   const at = now()
 
-  /* Wallet settlement: debit immediately. Otherwise raise a pending payment for
-     the accountant and leave the wallet untouched. */
+  /* Wallet settlement: always debit the wallet — partially when the balance is
+     short. Whatever the wallet cannot cover is raised as a pending payment for
+     the accountant (the same rule the pharmacy and the laboratory follow), so
+     every procedure performed is deducted and nothing is ever lost. */
   let chargedToWallet = false
   let balanceAfter = Number(patient.wallet) || 0
+  let shortfall = 0
   if (settle === 'Wallet' && amount > 0) {
-    if (balanceAfter < amount) {
-      const err = new Error(
-        `Insufficient wallet balance. ${qty} × "${service.name}" costs ₦${amount.toLocaleString()} but the patient has ₦${balanceAfter.toLocaleString()}. Fund the wallet first or settle by another method.`,
-      )
-      err.status = 400
-      throw err
-    }
-    balanceAfter -= amount
+    const debited = Math.min(balanceAfter, amount)
+    shortfall = amount - debited
+    balanceAfter -= debited
     patient.wallet = balanceAfter
     await patient.save()
-    chargedToWallet = true
+    chargedToWallet = debited > 0
   }
 
   patient.procedures.push({
     id: entryId, serviceId: service.id, name: service.name,
     amount: unit, quantity: qty, total: amount,
     performedBy: actor.name, role: actor.role, at, notes: body.notes || '',
-    chargedToWallet,
-    paymentStatus: chargedToWallet ? 'Paid' : 'Pending',
+    chargedToWallet, shortfall,
+    paymentStatus: shortfall <= 0.005 ? 'Paid' : 'Pending',
   })
   await patient.save()
 
   if (amount > 0) {
+    const fullyPaid = settle !== 'Wallet' ? false : shortfall <= 0.005
     const pay = new PaymentModel({
       _id: await nextId('payment'), id: '', ref: '',
       patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
       amount, method: settle,
-      service: `${service.name}${qty > 1 ? ` ×${qty}` : ''} (${entryId})`,
-      staff: actor.name, at, status: chargedToWallet ? 'Paid' : 'Pending',
+      service: `${service.name}${qty > 1 ? ` ×${qty}` : ''} (${entryId})${shortfall > 0.005 && settle === 'Wallet' ? ' - balance outstanding' : ''}`,
+      staff: fullyPaid ? actor.name : 'System', at, status: fullyPaid ? 'Paid' : 'Pending',
     })
     pay.id = pay._id
     await pay.save()
@@ -147,14 +146,15 @@ async function perform(body, actor) {
       const wtxId = await nextId('wallet')
       await WalletTxModel.create({
         _id: wtxId, id: wtxId,
-        patientId: patient.id, type: 'Debit', amount,
+        patientId: patient.id, type: 'Debit', amount: amount - shortfall,
         reason: `${service.name}${qty > 1 ? ` ×${qty}` : ''} (${entryId})`, method: 'Wallet',
         staff: actor.name, at, balanceAfter,
       })
-    } else {
+    }
+    if (shortfall > 0.005) {
       /* Outstanding: tell the accountant there is money to collect. */
       await notify('Accountant',
-        `Payment pending: ${qty} × ${service.name} ₦${amount.toLocaleString()} for ${patient.firstName} ${patient.surname} (${patient.id}) — settle by ${settle}.`)
+        `Payment pending: ₦${shortfall.toLocaleString()} outstanding on ${qty} × ${service.name} for ${patient.firstName} ${patient.surname} (${patient.id}).`)
     }
   }
 

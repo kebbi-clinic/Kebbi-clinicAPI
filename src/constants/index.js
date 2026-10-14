@@ -19,6 +19,9 @@ const CAPS = {
   'rad.result': 'Upload radiology reports',
   'rx.dispense': 'Dispense prescriptions',
   'inventory.manage': 'Manage pharmacy inventory & prices',
+  /* Laboratory & radiology test catalogue — the admin maintains the prices
+     (e.g. PCV = ₦2,000); the department staff may keep their own list in step. */
+  'tests.manage': 'Manage laboratory & radiology inventory and prices',
   'wallet.fund': 'Fund patient wallets / record payments',
   'staff.manage': 'Create / edit / deactivate staff',
   'staff.delete': 'Permanently delete a staff record',
@@ -41,8 +44,8 @@ const DEFAULT_ROLE_PERMISSIONS = {
   'Pharmacist': { can: ['rx.dispense', 'inventory.manage'], cannot: [] },
   /* The accountant needs the inactive list to chase outstanding balances. */
   'Accountant': { can: ['wallet.fund', 'patients.inactive.view'], cannot: [] },
-  'Laboratory Scientist': { can: ['lab.result'], cannot: [] },
-  'Radiologist': { can: ['rad.result'], cannot: [] },
+  'Laboratory Scientist': { can: ['lab.result', 'tests.manage'], cannot: [] },
+  'Radiologist': { can: ['rad.result', 'tests.manage'], cannot: [] },
 }
 
 /* Roles allowed to see patients whose status is Inactive. Everything else sees

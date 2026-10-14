@@ -7,26 +7,31 @@ const { now } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { broadcastActivity } = require('../sockets/socket')
 const { notify } = require('./notification.service')
-const { priceFor } = require('./settings.service')
+const { resolvePrice } = require('./test.service')
 
 /* Investigations arrive from the Consultation screen as plain test names
  * ("FBC") or as objects ({ test, dept, price }), with an optional invDept map —
  * accept all three for frontend compatibility.
  *
- * The price is resolved here, once, at request time: it is stamped onto the
- * investigation and never changes again, so later edits to the price list can
- * never rewrite what a patient was already billed. */
-function normaliseInvestigations(raw, invDept) {
+ * The price is resolved here, once, at request time from the lab/radiology
+ * test catalogue (the admin's editable price list) and stamped onto the
+ * investigation. It is re-read again at result upload — the billable moment —
+ * so an admin price edit always wins until the patient is actually billed. */
+async function normaliseInvestigations(raw, invDept) {
   if (!Array.isArray(raw)) return []
-  return raw.map((t) => {
+  const out = []
+  for (const t of raw) {
     if (typeof t === 'string') {
-      return { test: t, dept: invDept?.[t] || 'Lab', price: priceFor(t) }
+      const dept = invDept?.[t] || 'Lab'
+      out.push({ test: t, dept, price: await resolvePrice(t, dept) })
+    } else if (t && t.test) {
+      const dept = t.dept || invDept?.[t.test] || 'Lab'
+      /* The catalogue/settings price wins over anything the client sent; the
+         client price is only a last-resort fallback for unknown tests. */
+      out.push({ test: t.test, dept, price: await resolvePrice(t.test, dept, { fallback: Number(t.price) || 0 }) })
     }
-    return {
-      test: t.test, dept: t.dept || invDept?.[t.test] || 'Lab',
-      price: priceFor(t.test, t.price),
-    }
-  }).filter((t) => t.test)
+  }
+  return out.filter((t) => t.test)
 }
 
 /* Accept both 'Admission' (what the Consultation screen sends) and the older
@@ -36,8 +41,9 @@ const isAdmission = (v) => v === 'Admission' || v === 'Admit'
 /**
  * Create the admission the doctor asked for, and bill the bed charge.
  * The doctor supplies the number of days and the cost per night; the total is
- * taken from the wallet when the balance covers it, otherwise a pending payment
- * is raised for the accountant.
+ * always taken from the patient's wallet — whatever the wallet cannot cover is
+ * raised as a pending payment for the accountant (same rule as the pharmacy
+ * and the laboratory), so the bed charge is never lost.
  */
 async function createAdmission(visit, body, actor) {
   const ad = body.admission || {}
@@ -47,18 +53,21 @@ async function createAdmission(visit, body, actor) {
   const at = now()
   const patient = await PatientModel.findById(visit.patientId)
 
-  /* Take the bed charge from the wallet when it is affordable. */
+  /* Take the bed charge from the wallet — partially when the balance is short. */
   let chargedToWallet = false
+  let shortfall = 0
   if (totalCost > 0 && patient) {
     const balance = Number(patient.wallet) || 0
-    if (balance >= totalCost) {
-      patient.wallet = balance - totalCost
+    const debited = Math.min(balance, totalCost)
+    shortfall = totalCost - debited
+    if (debited > 0) {
+      patient.wallet = balance - debited
       await patient.save()
       chargedToWallet = true
       const wtxId = await nextId('wallet')
       await WalletTxModel.create({
         _id: wtxId, id: wtxId,
-        patientId: patient.id, type: 'Debit', amount: totalCost,
+        patientId: patient.id, type: 'Debit', amount: debited,
         reason: `Admission ${days} night(s) at ₦${costPerNight.toLocaleString()}/night`,
         method: 'Wallet', staff: actor.name, at, balanceAfter: patient.wallet,
       })
@@ -81,19 +90,20 @@ async function createAdmission(visit, body, actor) {
   await admission.save()
 
   /* The bed charge always produces a revenue record: paid when it came off the
-     wallet, pending when the accountant still has to collect it. */
+     wallet, with any shortfall pending for the accountant to collect. */
   if (totalCost > 0) {
+    const fullyPaid = shortfall <= 0.005
     const pay = new PaymentModel({
       _id: await nextId('payment'), id: '', ref: '',
       patientId: visit.patientId, patientName: admission.patientName,
       amount: totalCost, method: chargedToWallet ? 'Wallet' : 'Cash',
-      service: `Admission ${days} night(s) — ${admission.ward} ${admission.bed}`.trim(),
-      staff: actor.name, at, status: chargedToWallet ? 'Paid' : 'Pending',
+      service: `Admission ${days} night(s) — ${admission.ward} ${admission.bed}${fullyPaid ? '' : ' - balance outstanding'}`.trim(),
+      staff: fullyPaid ? actor.name : 'System', at, status: fullyPaid ? 'Paid' : 'Pending',
     })
     pay.id = pay._id
     await pay.save()
-    if (!chargedToWallet) {
-      await notify('Accountant', `Bed charge pending: ₦${totalCost.toLocaleString()} for ${admission.patientName} (${admission.patientId}) — ${days} night(s) in ${admission.ward}.`)
+    if (!fullyPaid) {
+      await notify('Accountant', `Bed charge outstanding: ₦${shortfall.toLocaleString()} for ${admission.patientName} (${admission.patientId}) — ${days} night(s) in ${admission.ward}.`)
     }
   }
 
@@ -144,7 +154,7 @@ async function completeConsultation(visitId, body, actor) {
   /* Create investigations — but only the first time round. Re-opening a saved
      consultation must not queue the same tests twice (which would charge the
      patient twice), so anything already raised for this visit is left alone. */
-  const invs = normaliseInvestigations(body.investigations, body.invDept)
+  const invs = await normaliseInvestigations(body.investigations, body.invDept)
   const alreadyRequested = isRevisit
     ? await InvestigationModel.countDocuments({ visitId: visit.id })
     : 0

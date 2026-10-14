@@ -32,6 +32,34 @@ const dispense = [
   }),
 ]
 
+/* Laboratory & radiology test catalogue — inventory and prices. */
+const testId = [
+  param('id').trim().notEmpty().withMessage('Test id is required'),
+]
+
+const createTest = [
+  body('name').trim().notEmpty().withMessage('Test name is required').isLength({ max: 120 }),
+  body('price').notEmpty().withMessage('Price is required').isFloat({ min: 0 }).withMessage('Price must be a positive number'),
+  body('dept').optional({ values: 'falsy' }).isIn(['Lab', 'Laboratory', 'Radiology']).withMessage('Department must be Lab or Radiology'),
+  body('category').optional({ values: 'falsy' }).isString().isLength({ max: 60 }),
+  body('unit').optional({ values: 'falsy' }).isString().isLength({ max: 60 }),
+  body('stock').optional().isInt({ min: 0 }).withMessage('Stock must be a whole number ≥ 0'),
+  body('minStock').optional().isInt({ min: 0 }).withMessage('Minimum stock must be a whole number ≥ 0'),
+  body('active').optional().isBoolean().withMessage('active must be true or false'),
+]
+
+const updateTest = [
+  param('id').trim().notEmpty().withMessage('Test id is required'),
+  body('name').optional({ values: 'falsy' }).trim().isLength({ max: 120 }),
+  body('price').optional({ values: 'null' }).isFloat({ min: 0 }).withMessage('Price must be a positive number'),
+  body('dept').optional({ values: 'falsy' }).isIn(['Lab', 'Laboratory', 'Radiology']).withMessage('Department must be Lab or Radiology'),
+  body('category').optional({ values: 'falsy' }).isString().isLength({ max: 60 }),
+  body('unit').optional({ values: 'falsy' }).isString().isLength({ max: 60 }),
+  body('stock').optional({ values: 'null' }).isInt({ min: 0 }).withMessage('Stock must be a whole number ≥ 0'),
+  body('minStock').optional({ values: 'null' }).isInt({ min: 0 }).withMessage('Minimum stock must be a whole number ≥ 0'),
+  body('active').optional().isBoolean().withMessage('active must be true or false'),
+]
+
 /* Validation schemas — procedures & services (the priced catalogue an admin
  * creates and nurses/doctors perform). */
 
@@ -70,4 +98,4 @@ const performService = [
     .withMessage('Settlement must be Wallet, Cash, Transfer or POS'),
 ]
 
-module.exports = { createDrug, updateDrug, dispense, createService, updateService, performService, serviceId }
+module.exports = { createDrug, updateDrug, dispense, testId, createTest, updateTest, createService, updateService, performService, serviceId }

@@ -2,10 +2,11 @@
 const bcrypt = require('bcryptjs')
 const { SettingModel, CounterModel } = require('../models')
 const { now } = require('../utils/datetime')
-const { DEFAULT_ROLE_PERMISSIONS } = require('../constants')
+const { DEFAULT_ROLE_PERMISSIONS, DEFAULT_INVESTIGATION_PRICES } = require('../constants')
 const {
   StaffModel, PatientModel, VisitModel, VitalModel, InvestigationModel,
   PrescriptionModel, AdmissionModel, PaymentModel, WalletTxModel, DrugModel,
+  TestModel,
   ActivityModel, AuditModel, NotificationModel,
 } = require('../models')
 
@@ -116,6 +117,26 @@ async function seedClinical() {
   }))
   await DrugModel.insertMany(drugDocs)
   const D = (name) => drugDocs.find((x) => x.name === name)
+
+  /* ---- LAB & RADIOLOGY INVENTORY (test catalogue — prices drive billing) ---- */
+  await TestModel.deleteMany({})
+  const RAD_TESTS = ['Chest X-Ray (PA)', 'Chest X-ray', 'Abdominal Ultrasound']
+  const LAB_CATS = {
+    PCV: 'Haematology', FBC: 'Haematology', RBS: 'Haematology', FBS: 'Chemistry',
+    'S/U/C': 'Chemistry', Urinalysis: 'Microbiology', 'Pregnancy Test': 'Immunology',
+    'Urine MCS': 'Microbiology', 'Swab MCS': 'Microbiology', HCV: 'Serology',
+    RVS: 'Serology', VDRL: 'Serology', HBsAg: 'Serology', 'Malaria Parasite (MP)': 'Parasitology',
+    HbA1c: 'Chemistry',
+  }
+  const testDocs = Object.entries(DEFAULT_INVESTIGATION_PRICES).map(([name, price], i) => ({
+    _id: `TST-${String(i + 1).padStart(4, '0')}`, id: `TST-${String(i + 1).padStart(4, '0')}`,
+    name,
+    dept: RAD_TESTS.includes(name) ? 'Radiology' : 'Lab',
+    category: LAB_CATS[name] || 'Imaging',
+    unit: 'Test', price, stock: 0, minStock: 0, active: true,
+    createdBy: 'seed', createdAt: now(), updatedAt: now(),
+  }))
+  await TestModel.insertMany(testDocs)
 
   /* ---- PATIENTS (permanent record, unique ID) ---- */
   await PatientModel.deleteMany({})

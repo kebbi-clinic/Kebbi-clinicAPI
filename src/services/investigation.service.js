@@ -1,23 +1,27 @@
 /* Laboratory & Radiology service — request queue and result upload.
  *
- * Submitting a result is the billable moment: the test's price, stamped on the
- * request when the doctor raised it, is taken from the patient's wallet. What the
- * wallet cannot cover is raised as a pending payment so the accountant still has
- * a record — the result is never blocked and the money is never lost. */
+ * Submitting a result is the billable moment: the test's price — the admin's
+ * current catalogue price, re-read right here — is taken from the patient's
+ * wallet. What the wallet cannot cover is raised as a pending payment so the
+ * accountant still has a record — the result is never blocked and the money is
+ * never lost. A result may be a photo/scan OR typed values (either is enough). */
 const { InvestigationModel, PatientModel, PaymentModel, WalletTxModel,
         ActivityModel, clean } = require('../models')
 const { nextId } = require('../config/db')
-const { now } = require('../utils/datetime')
+const { now, byNewest } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { broadcastActivity } = require('../sockets/socket')
 const { notify } = require('./notification.service')
 const { uploadResult } = require('../services/storage.service')
+const { resolvePrice } = require('./test.service')
 const emailService = require('./email.service')
 
 async function list(dept) {
   const filter = dept ? { dept: dept === 'Radiology' ? 'Radiology' : 'Lab' } : {}
-  const list = await InvestigationModel.find(filter).sort('-createdAt')
-  return list.map(clean)
+  const rows = await InvestigationModel.find(filter).lean()
+  /* LATEST FIRST — a real timestamp sort, so a request filed at 02:30 pm sits
+     above one from 10:20 am (a plain string sort would get that wrong). */
+  return [...rows].sort(byNewest('createdAt'))
 }
 
 /* Take the test fee from the patient's wallet. Returns the money facts for the
@@ -76,20 +80,28 @@ async function saveResult(id, file, { values }, actor) {
   if (!inv) {
     const err = new Error('Investigation not found'); err.status = 404; throw err
   }
-  if (!file) {
-    const err = new Error('Result image is required'); err.status = 400; throw err
+  const text = String(values || '').trim()
+  /* Either medium is enough: a photo/scan of the result sheet, or the values
+     typed in. Previously a missing file blocked every text-only submission. */
+  if (!file && !text) {
+    const err = new Error('Attach a result image (photo/scan) or type the result values — either one is enough.')
+    err.status = 400; throw err
   }
-  const url = await uploadResult(file, file.buffer)
+  const url = file ? await uploadResult(file, file.buffer) : ''
   const at = now()
 
   /* Bill once. A corrected re-upload must never charge the patient twice. */
   const alreadyBilled = inv.status === 'Completed'
+  /* The admin may have re-priced this test since the request was raised — the
+     price in force NOW is the one billed at upload (falls back to the stamped
+     price when the catalogue knows nothing about the test). */
+  inv.price = await resolvePrice(inv.test, inv.dept, { fallback: Number(inv.price) || 0 })
   const money = alreadyBilled
     ? { price: Number(inv.price) || 0, debitedFromWallet: 0, outstanding: 0, walletBalance: null }
     : await charge(inv.patientId, inv, actor, at)
 
   inv.status = 'Completed'
-  inv.result = { image: url, values: values || '', at, by: actor.name }
+  inv.result = { image: url, values: text, at, by: actor.name }
   inv.chargedToWallet = money.debitedFromWallet > 0
   inv.paymentStatus = money.price === 0 ? 'Free' : (money.outstanding <= 0.005 ? 'Paid' : 'Pending')
   await inv.save()

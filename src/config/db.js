@@ -76,14 +76,14 @@ const COUNTERS = {
   patient: 'KBC', visit: 'VIS', vital: 'VIT', investigation: 'INV',
   radiology: 'RDG', prescription: 'RX', admission: 'ADM', payment: 'PAY',
   wallet: 'WTX', drug: 'DRG', staff: 'STF',
-  service: 'SVC', procedure: 'PRC',
+  service: 'SVC', procedure: 'PRC', test: 'TST',
 }
 
 /* Bump when new settings fields or capabilities are introduced. Databases with a
  * lower schemaVersion are upgraded once at boot (see upgradeSettings) so an
  * already-seeded install picks up the new capabilities instead of silently
  * denying every request that needs them. */
-const SETTINGS_SCHEMA_VERSION = 2
+const SETTINGS_SCHEMA_VERSION = 3
 
 /* One-time upgrade of the stored settings document:
  *  · add the capabilities introduced since the database was seeded, keeping any

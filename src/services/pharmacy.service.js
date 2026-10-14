@@ -3,7 +3,7 @@
 const { PatientModel, PrescriptionModel, PaymentModel, WalletTxModel, DrugModel,
         ActivityModel, InvestigationModel, clean } = require('../models')
 const { nextId } = require('../config/db')
-const { now } = require('../utils/datetime')
+const { now, byNewest } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { notify } = require('./notification.service')
 const { broadcastActivity } = require('../sockets/socket')
@@ -11,8 +11,9 @@ const emailService = require('./email.service')
 
 async function listPrescriptions(patientId) {
   const filter = patientId ? { patientId } : {}
-  const rows = await PrescriptionModel.find(filter).sort('-createdAt')
-  return rows.map(clean)
+  const rows = await PrescriptionModel.find(filter).lean()
+  /* LATEST FIRST — real timestamp order, not a string compare. */
+  return [...rows].sort(byNewest('createdAt'))
 }
 
 async function dispense(id, body, actor) {

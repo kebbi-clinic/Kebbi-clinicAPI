@@ -3,7 +3,7 @@
 const { PatientModel, VisitModel, VitalModel, InvestigationModel, PrescriptionModel,
         PaymentModel, AdmissionModel, WalletTxModel, ActivityModel, AuditModel, clean } = require('../models')
 const { nextId, getSettings } = require('../config/db')
-const { now } = require('../utils/datetime')
+const { now, byNewest } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { notify } = require('./notification.service')
 const { broadcastActivity } = require('../sockets/socket')
@@ -100,8 +100,8 @@ function notFound(msg) {
 async function get360(id) {
   const patient = await PatientModel.findById(id)
   if (!patient) throw notFound('Patient not found')
-  const [visits, vitals, investigations, prescriptions, payments, admissions, walletTxs, activity, auditRows] = await Promise.all([
-    VisitModel.find({ patientId: id }).sort('-createdAt').lean(),
+  const [visits0, vitals, investigations, prescriptions, payments, admissions, walletTxs, activity, auditRows] = await Promise.all([
+    VisitModel.find({ patientId: id }).lean(),
     VitalModel.find({ patientId: id }).sort('-at').lean(),
     InvestigationModel.find({ patientId: id }).sort('-createdAt').lean(),
     PrescriptionModel.find({ patientId: id }).sort('-createdAt').lean(),
@@ -111,6 +111,9 @@ async function get360(id) {
     ActivityModel.find({ patientId: id }).sort('time').lean(),
     AuditModel.find({ target: id }).sort('-when').lean(),
   ])
+  /* Visits: LATEST FIRST by real timestamp (a plain string sort puts 02:30 pm
+     below 10:20 am). */
+  const visits = [...visits0].sort(byNewest('createdAt'))
 
   const careTeam = []
   const push = (role, name, action, at) => { if (name) careTeam.push({ role, name, action, at }) }
@@ -149,8 +152,8 @@ async function get360(id) {
 async function getBasic(id) {
   const patient = await PatientModel.findById(id)
   if (!patient) throw notFound('Patient not found')
-  const [visits, vitals, investigations, prescriptions, payments, admissions, walletTxs, activity] = await Promise.all([
-    VisitModel.find({ patientId: id }).sort('-createdAt').lean(),
+  const [visits0, vitals, investigations, prescriptions, payments, admissions, walletTxs, activity] = await Promise.all([
+    VisitModel.find({ patientId: id }).lean(),
     VitalModel.find({ patientId: id }).sort('-at').lean(),
     InvestigationModel.find({ patientId: id }).sort('-createdAt').lean(),
     PrescriptionModel.find({ patientId: id }).sort('-createdAt').lean(),
@@ -159,6 +162,8 @@ async function getBasic(id) {
     WalletTxModel.find({ patientId: id }).sort('-at').lean(),
     ActivityModel.find({ patientId: id }).sort('time').lean(),
   ])
+  /* Visits: LATEST FIRST by real timestamp — see get360. */
+  const visits = [...visits0].sort(byNewest('createdAt'))
   return {
     ...clean(patient),
     visits: visits.map(clean), vitals: vitals.map(clean),

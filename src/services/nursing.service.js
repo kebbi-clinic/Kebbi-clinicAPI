@@ -66,14 +66,35 @@ async function discharge(id, body, actor) {
   await admission.save()
   const visit = await VisitModel.findOne({ id: admission.visitId })
   if (visit) { visit.status = 'Completed'; await visit.save() }
-  const text = `Patient discharged from ${admission.ward}`
+
+  /* Discharge closes the patient's episode: they are automatically deactivated
+     (Active → Inactive). History is fully preserved and the Records Officer can
+     re-activate them (which charges the activation fee) on their next visit. */
+  let deactivated = false
+  const patient = await PatientModel.findById(admission.patientId)
+  if (patient && patient.status === 'Active') {
+    patient.status = 'Inactive'
+    patient.deactivatedAt = now()
+    patient.deactivatedBy = actor.name
+    patient.deactivatedReason = 'Discharged'
+    await patient.save()
+    deactivated = true
+  }
+
+  const text = deactivated
+    ? `Patient discharged from ${admission.ward} — patient marked INACTIVE automatically`
+    : `Patient discharged from ${admission.ward}`
   await ActivityModel.create({ patientId: admission.patientId, time: now(), what: text, meta: `${actor.role} - ${actor.name}`, dept: 'Nursing', green: true })
   broadcastActivity(
     { patientId: admission.patientId, time: now(), what: text, meta: `${actor.role} - ${actor.name}`, dept: 'Nursing', green: true },
     'Records Officer', actor.name,
   )
-  await audit(actor.name, 'Discharged patient', admission.patientId, 'Nursing', admission.id)
-  return clean(admission)
+  if (deactivated) {
+    await notify('Records Officer', `${patient.firstName} ${patient.surname} (${patient.id}) was discharged and is now INACTIVE — re-activate when they return.`)
+  }
+  await audit(actor.name, 'Discharged patient', admission.patientId, 'Nursing',
+    `${admission.id}${deactivated ? ' — deactivated' : ''}`)
+  return { ...clean(admission), patientDeactivated: deactivated }
 }
 
 module.exports = { listVitals, createVitals, listAdmissions, discharge }
