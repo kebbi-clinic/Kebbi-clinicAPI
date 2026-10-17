@@ -2,6 +2,7 @@
 const jwt = require('jsonwebtoken')
 const { config } = require('../config/env')
 const { getSettings } = require('../config/db')
+const { DEFAULT_ROLE_PERMISSIONS } = require('../constants')
 
 function signToken(user) {
   return jwt.sign(user, config.jwtSecret, { expiresIn: config.jwtExpiresIn })
@@ -25,11 +26,15 @@ function requireAuth(req, res, next) {
 
 /* Can the user's role perform capability `cap`? Reads the live settings cache.
  * A per-account override (JWT `caps`, set when an admin creates a scoped
- * admin account) takes precedence: if present, ONLY those capabilities pass. */
+ * admin account) takes precedence: if present, ONLY those capabilities pass.
+ *
+ * When this instance's settings cache has not loaded yet (cold container on
+ * serverless), the shipped defaults stand in — a missing cache must deny
+ * nothing and must not make screens randomly 403 while other instances work. */
 function can(role, cap, user) {
   if (user && Array.isArray(user.caps) && user.caps.length) return user.caps.includes(cap)
   if (role === 'Super Admin' || role === 'Hospital Administrator') return true
-  const perms = getSettings()?.rolePermissions
+  const perms = getSettings()?.rolePermissions || DEFAULT_ROLE_PERMISSIONS
   const entry = perms?.[role]
   if (entry?.cannot?.includes(cap)) return false
   return entry?.can?.includes(cap) || false

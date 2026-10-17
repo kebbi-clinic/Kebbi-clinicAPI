@@ -1,6 +1,6 @@
 /* Settings service — the single hospital configuration document. */
 const { SettingModel } = require('../models')
-const { getSettings, setSettings, loadSettings } = require('../config/db')
+const { getSettings, setSettings, loadSettings, freshSettings } = require('../config/db')
 const { DEFAULT_ROLE_PERMISSIONS, RX_ROUTES, RX_FREQUENCIES, DEFAULT_INVESTIGATION_PRICES } = require('../constants')
 const { now } = require('../utils/datetime')
 const { audit } = require('./audit.service')
@@ -13,14 +13,38 @@ const { notify } = require('./notification.service')
    `investigationPrices` is the effective price list: administrator overrides win,
    then the built-in defaults, so a brand-new test is priced the moment it is
    added rather than silently billed at ₦0. */
-function get() {
-  const s = getSettings()
+async function get() {
+  /* What the activation-fee notice and the admin console show must be the
+     stored document, not a possibly-stale per-instance copy — a stale read
+     here is what made the app announce ₦0 while activation still charged
+     ₦2,000. The cache is only a fallback when the database cannot be reached. */
+  let s = null
+  try {
+    await loadSettings()
+    s = getSettings()
+  } catch (e) {
+    console.warn('[settings] fresh read failed, using cache:', e.message)
+    s = getSettings()
+  }
   if (!s) return s
   return {
     ...s,
     rxRoutes: RX_ROUTES, rxFrequencies: RX_FREQUENCIES,
     investigationPrices: { ...DEFAULT_INVESTIGATION_PRICES, ...(s.investigationPrices || {}) },
   }
+}
+
+/* The fee an activation actually charges. Money must always follow the stored
+   document — a stale cache on this instance must never decide the amount. */
+async function currentActivationFee() {
+  let s = null
+  try {
+    s = await freshSettings()
+  } catch (e) {
+    console.warn('[settings] fresh fee read failed:', e.message)
+    s = getSettings()
+  }
+  return Number(s?.activationFee) || 0
 }
 
 /** Price of one investigation, preferring the request's own stored price. */
@@ -50,8 +74,15 @@ async function update(body, actor) {
       : (existing?.investigationPrices || {}),
     schemaVersion: existing?.schemaVersion || 0,
   }
-  await SettingModel.deleteOne({})
-  await SettingModel.create(updated)
+  /* Atomic replace (upsert) instead of delete-one + create: under concurrent
+     saves on serverless the old two-step dance could leave TWO settings
+     documents behind, after which findOne() returned an arbitrary one and the
+     fee flickered between values on different requests. Any historic
+     duplicates are purged as well. */
+  const kept = await SettingModel.findOneAndUpdate({}, updated, {
+    upsert: true, returnDocument: 'after', setDefaultsOnInsert: false,
+  })
+  await SettingModel.deleteMany({ _id: { $ne: kept._id } })
   setSettings(updated)
   await loadSettings()
   await audit(actor.name, 'Updated settings', '', 'Administration')
@@ -76,4 +107,4 @@ async function updatePermissions(matrix, actor) {
   return { ok: true, matrix, at: now() }
 }
 
-module.exports = { get, update, updatePermissions, priceFor }
+module.exports = { get, update, updatePermissions, priceFor, currentActivationFee }

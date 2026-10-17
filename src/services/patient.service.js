@@ -2,10 +2,11 @@
  * one patient (KBC-XXXXXX) → many visits. Returning patients never get re-registered. */
 const { PatientModel, VisitModel, VitalModel, InvestigationModel, PrescriptionModel,
         PaymentModel, AdmissionModel, WalletTxModel, ActivityModel, AuditModel, clean } = require('../models')
-const { nextId, getSettings } = require('../config/db')
+const { nextId } = require('../config/db')
 const { now, byNewest } = require('../utils/datetime')
 const { audit } = require('./audit.service')
 const { notify } = require('./notification.service')
+const { currentActivationFee } = require('./settings.service')
 const { broadcastActivity } = require('../sockets/socket')
 const emailService = require('./email.service')
 const { INACTIVE_VIEW_ROLES, ACTIVATE_ROLES } = require('../constants')
@@ -218,7 +219,10 @@ async function activate(patientOrId, actor) {
     return { ...clean(patient), activationFee: 0, alreadyActive: true }
   }
 
-  const fee = Number(getSettings()?.activationFee) || 0
+  /* Read the stored fee, never the per-instance cache: the number shown on
+     the activation notice comes from the same stored document, so the two
+     can no longer disagree (₦0 announced but ₦2,000 charged). */
+  const fee = await currentActivationFee()
   const balance = Number(patient.wallet) || 0
   if (fee > 0 && balance < fee) {
     const err = new Error(
@@ -234,6 +238,28 @@ async function activate(patientOrId, actor) {
   patient.activatedBy = actor.name
   if (fee > 0) patient.wallet = balance - fee
   await patient.save()
+
+  /* A brand-new (or returning) patient has no open visit yet — and the vitals
+     form requires one, so without this step "Record Vitals" from the nurses'
+     queue lands on a dead "No open visit" screen. Open the episode's visit
+     here (skipped when one is already open, so repeat calls never duplicate). */
+  let openedVisit = null
+  const openVisit = await VisitModel.findOne({
+    patientId: patient.id, status: { $in: ['Open', 'Waiting', 'Active'] },
+  })
+  if (!openVisit) {
+    const visit = new VisitModel({
+      _id: await nextId('visit'), id: '',
+      patientId: patient.id, date: at, createdAt: at, type: 'Outpatient', status: 'Open',
+    })
+    visit.id = visit._id
+    await visit.save()
+    openedVisit = visit.id
+    await ActivityModel.create({
+      patientId: patient.id, time: at, what: `New visit started (${visit.id})`,
+      meta: `Records - ${actor.name}`, dept: 'Records', green: true,
+    })
+  }
 
   /* The wallet ledger and the revenue record for the activation charge. */
   if (fee > 0) {
@@ -268,9 +294,10 @@ async function activate(patientOrId, actor) {
   /* Nurses pick the patient up from their dashboard "new patients" queue. */
   await notify('Nurse', `New patient activated: ${patient.firstName} ${patient.surname} (${patient.id}) — ready for vitals.`)
   await audit(actor.name, 'Activated patient', patient.id, 'Records',
-    fee > 0 ? `Activation fee ₦${fee.toLocaleString()} charged to wallet` : undefined)
+    (fee > 0 ? `Activation fee ₦${fee.toLocaleString()} charged to wallet` : 'No activation fee')
+    + (openedVisit ? ` — visit ${openedVisit} opened` : ''))
 
-  return { ...clean(patient), activationFee: fee, alreadyActive: false }
+  return { ...clean(patient), activationFee: fee, alreadyActive: false, visitId: openedVisit }
 }
 
 module.exports = {

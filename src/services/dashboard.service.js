@@ -5,6 +5,7 @@ const { PatientModel, StaffModel, VisitModel, PaymentModel, PrescriptionModel,
         VitalModel, clean } = require('../models')
 const { getSettings } = require('../config/db')
 const { now, parseWhen, whenMs, dayPrefix } = require('../utils/datetime')
+const { DEFAULT_ROLE_PERMISSIONS } = require('../constants')
 
 const sum = (rows) => rows.reduce((t, r) => t + (Number(r.amount) || 0), 0)
 const nameOf = (p) => (p ? `${p.firstName || ''} ${p.surname || ''}`.trim() : '')
@@ -20,8 +21,12 @@ const byTimeDesc = (field) => (a, b) => whenMs(b[field]) - whenMs(a[field])
  * patient names joined in because vitals/investigations store only patientId.
  */
 async function roleDashboard(role) {
-  const perms = getSettings()?.rolePermissions?.[role]
-  const caps = perms?.can || []
+  /* Which sections this role may see. When the per-instance settings cache has
+     not loaded yet (cold container) we fall back to the shipped defaults
+     instead of handing back an EMPTY dashboard — a missing cache must never
+     hide the nurses' "new patients" queue. */
+  const matrix = getSettings()?.rolePermissions || DEFAULT_ROLE_PERMISSIONS
+  const caps = matrix[role]?.can || []
   const stats = {}
   const out = { role, caps, stats }
 
@@ -95,10 +100,26 @@ async function roleDashboard(role) {
     out.recentVitals = vitals.sort(byTimeDesc('at')).slice(0, 20).map(withName)
 
     /* Requirement: patients activated by the Records Officer show up here as
-       new patients, until their first vitals are recorded. */
+       new patients — until vitals are recorded FOR THIS ACTIVATION. A
+       returning patient re-activated after discharge already has vitals from
+       an earlier episode on file; those old entries must not hide them from
+       the queue, so only vitals taken at/after their latest activatedAt count.
+       (Patients whose activatedAt cannot be parsed keep the old "no vitals
+       ever" rule as a fallback.) */
     const seenVitals = new Set(vitals.map((v) => v.patientId))
+    const latestVitalMs = new Map()
+    vitals.forEach((v) => {
+      const ms = whenMs(v.at)
+      if (ms > (latestVitalMs.get(v.patientId) || 0)) latestVitalMs.set(v.patientId, ms)
+    })
+    const needsVitals = (p) => {
+      if (!p.activatedAt) return false
+      const actMs = whenMs(p.activatedAt)
+      if (!(actMs > 0)) return !seenVitals.has(p.id)
+      return (latestVitalMs.get(p.id) || 0) < actMs
+    }
     out.newPatients = patients
-      .filter((p) => p.status === 'Active' && p.activatedAt && !seenVitals.has(p.id))
+      .filter((p) => p.status === 'Active' && needsVitals(p))
       .sort(byTimeDesc('activatedAt'))
       .slice(0, 25)
       .map((p) => ({ ...p, patientName: nameOf(p), vitalsTaken: false }))

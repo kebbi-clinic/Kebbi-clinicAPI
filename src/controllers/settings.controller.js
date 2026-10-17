@@ -8,11 +8,11 @@ const settingsService = require('../services/settings.service')
 
 exports.dashboard = asyncHandler(async (req, res) => res.json(await dashboardService.roleDashboard(req.user.role)))
 
-exports.getSettings = asyncHandler(async (_req, res) => res.json(settingsService.get()))
+exports.getSettings = asyncHandler(async (_req, res) => res.json(await settingsService.get()))
 exports.updateSettings = asyncHandler(async (req, res) => res.json(await settingsService.update(req.body, req.user)))
 
 exports.getPermissions = asyncHandler(async (_req, res) => {
-  const matrix = settingsService.get()?.rolePermissions || {}
+  const matrix = (await settingsService.get())?.rolePermissions || {}
   const counts = {}
   for (const role of ROLES) { counts[role] = await StaffModel.countDocuments({ role }) }
   res.json({ matrix, counts, caps: CAPS })

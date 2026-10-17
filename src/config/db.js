@@ -110,6 +110,25 @@ async function upgradeSettings(doc) {
 }
 
 let SETTINGS = null // in-memory cache of the _settings doc (lives behind getSettings())
+let SETTINGS_AT = 0 // when the cache was last loaded from the database
+/* Serverless instances each keep their own copy of SETTINGS, so a fee or
+ * permission change saved through one instance used to stay invisible to the
+ * others until they were recycled — the same screen showed ₦0 on one request
+ * and charged ₦2,000 on the next. The cache self-heals: anything older than
+ * the TTL triggers a background re-read, so every instance converges on the
+ * stored document within seconds without blocking requests. */
+const SETTINGS_TTL_MS = 30_000
+let revalidating = false
+
+/* Fire-and-forget refresh of the settings cache. Safe to call from hot paths:
+ * concurrent callers collapse onto one in-flight reload and failures only log. */
+function refreshSettings() {
+  if (revalidating) return
+  revalidating = true
+  loadSettings()
+    .catch((e) => console.warn('[db] settings revalidate failed:', e.message))
+    .finally(() => { revalidating = false })
+}
 
 /* Connection options. `bufferCommands: false` is the important one: it stops
  * Mongoose from parking a query in a buffer for 10s when the connection is not
@@ -228,7 +247,7 @@ async function loadSettings() {
   if (s && (s.schemaVersion || 0) < SETTINGS_SCHEMA_VERSION) {
     try { await upgradeSettings(s) } catch (e) { console.warn('[db] settings upgrade failed:', e.message) }
   }
-  if (!s) { SETTINGS = null; return }
+  if (!s) { SETTINGS = null; SETTINGS_AT = Date.now(); return }
   s = await SettingModel.findOne()
   SETTINGS = {
     hospital: s.hospital, investigationTypes: s.investigationTypes,
@@ -239,11 +258,31 @@ async function loadSettings() {
     /* Test name -> price. Empty object means "use the built-in defaults". */
     investigationPrices: s.investigationPrices || {},
   }
+  SETTINGS_AT = Date.now()
 }
 
-function setSettings(s) { SETTINGS = s }
-function getSettings() { return SETTINGS }
+function setSettings(s) { SETTINGS = s; SETTINGS_AT = Date.now() }
+/* The whole backend reads permissions and fees through here. When the cached
+ * copy is older than the TTL we kick off a background reload so the value
+ * returned (and every later read) reflects the stored document — the caller
+ * never waits for it, so hot paths (auth checks, dashboards) stay fast. */
+function getSettings() {
+  if (SETTINGS && Date.now() - SETTINGS_AT > SETTINGS_TTL_MS) refreshSettings()
+  return SETTINGS
+}
+
+/* Money paths (activation fees, priced billing) must never charge from a
+ * possibly-stale cache: await this for the stored document, falling back to
+ * the cache only when the database cannot be reached. */
+async function freshSettings() {
+  try {
+    await loadSettings()
+  } catch (e) {
+    console.warn('[db] fresh settings read failed, using cache:', e.message)
+  }
+  return getSettings()
+}
 
 const uploadsDir = path.join(__dirname, '..', '..', 'data', 'uploads')
 
-module.exports = { connect, ensureConnected, nextId, loadSettings, setSettings, getSettings, uploadsDir, SettingModel, CounterModel }
+module.exports = { connect, ensureConnected, nextId, loadSettings, setSettings, getSettings, freshSettings, uploadsDir, SettingModel, CounterModel }
