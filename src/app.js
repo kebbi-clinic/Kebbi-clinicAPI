@@ -17,6 +17,16 @@ app.use(cors({
     return cb(new Error(`Origin ${origin} not allowed by CORS`))
   },
 }))
+/* API responses must never be cached by the browser or any CDN in between.
+   Without this header the browser stores the first response (including its
+   CORS headers) and reuses it on subsequent requests — which is exactly how a
+   stale `Access-Control-Allow-Origin` from an old deployment survives a code
+   fix and keeps blocking the dashboard. `no-store` forces every request to
+   hit the server so the current CORS policy always applies. */
+app.use('/api', (_req, res, next) => {
+  res.set('Cache-Control', 'no-store')
+  next()
+})
 app.use(express.json({ limit: '2mb' }))
 
 /* Static result-file serving (local-storage fallback). */

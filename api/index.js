@@ -30,6 +30,7 @@ function fail(res, req, status, message) {
     res.setHeader('Access-Control-Allow-Origin', origin)
     res.setHeader('Vary', 'Origin')
   }
+  res.setHeader('Cache-Control', 'no-store')
   res.setHeader('content-type', 'application/json')
 
   /* A preflight must succeed for the browser to send the real request at all;

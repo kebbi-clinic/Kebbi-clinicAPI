@@ -6,11 +6,30 @@ require('dotenv').config({ path: path.join(__dirname, '..', '..', '.env') })
 
 const nodeEnv = process.env.NODE_ENV || 'development'
 
-/* Comma-separated list of allowed frontend origins (falls back to the two dev apps). */
-const corsOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://localhost:5174')
-  .split(',')
-  .map((o) => o.trim())
-  .filter(Boolean)
+/* Comma-separated list of allowed frontend origins.
+   Production origins are hardcoded here so a missing/incorrect CORS_ORIGINS
+   env var can never lock the deployed apps out again. The env var (when set)
+   is *merged in* on top of these, never replaces them. */
+const HARDCODED_ORIGINS = [
+  'https://dashboard.kebbiclinic.com.ng',
+  'https://www.dashboard.kebbiclinic.com.ng',
+  'https://hospital.kebbiclinic.com.ng',
+  'https://www.hospital.kebbiclinic.com.ng',
+  'https://protector.kebbiclinic.com.ng',
+  'https://www.protector.kebbiclinic.com.ng',
+  'https://www.kebbiclinic.com.ng',
+  'https://kebbiclinic.com.ng',
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:4173',
+  'http://localhost:4174',
+]
+const corsOrigins = [
+  ...new Set([
+    ...HARDCODED_ORIGINS,
+    ...(process.env.CORS_ORIGINS || '').split(',').map((o) => o.trim()).filter(Boolean),
+  ]),
+]
 
 /* Whether an Origin header is allowed to call the API.
    Explicitly listed origins always pass; additionally any subdomain of
