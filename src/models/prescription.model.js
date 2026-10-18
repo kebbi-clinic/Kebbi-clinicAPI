@@ -7,6 +7,9 @@ const PrescriptionSchema = new mongoose.Schema({
      duration in days, qty, and the live unit price from pharmacy inventory. */
   items: [{
     drugId: String, drug: String, route: String, frequency: String,
+    /* Dosage strength per unit, free text like 80mg / 500mg / 5ml — entered by
+       the doctor on the Consultation prescription table. */
+    dose: String,
     duration: Number, qty: Number, price: Number,
   }],
   status: String, dispensedBy: String, dispensedAt: String,

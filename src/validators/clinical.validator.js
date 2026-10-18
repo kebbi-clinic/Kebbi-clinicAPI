@@ -26,6 +26,9 @@ const consultation = [
   /* Frequency: Daily, BD, TDS, noctal, PRN, 4hrly … 24hrly. */
   body('items.*.frequency').optional({ values: 'falsy' }).isIn(RX_FREQUENCIES)
     .withMessage(`Frequency must be one of: ${RX_FREQUENCIES.join(', ')}`),
+  /* Dosage strength per unit — free text like 80mg / 500mg / 5ml. */
+  body('items.*.dose').optional({ values: 'falsy' }).isString().isLength({ max: 40 })
+    .withMessage('Dose must be 40 characters or fewer (e.g. 80mg)'),
   /* Duration of the course, in whole days. */
   body('items.*.duration').optional({ values: 'falsy' }).isInt({ min: 1, max: 365 })
     .withMessage('Prescription duration must be between 1 and 365 days'),

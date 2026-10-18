@@ -156,7 +156,13 @@ async function roleDashboard(role) {
     stats.completed = paid.length
     stats.funding = sum(walletTxs.filter((t) => t.type === 'Credit' && String(t.at).startsWith(dayStr)))
     out.txs = walletTxs.sort(byTimeDesc('at')).slice(0, 30)
-      .map((t) => ({ ...t, patientName: nameOf(byId.get(t.patientId)) }))
+      .map((t) => ({
+        ...t,
+        patientName: nameOf(byId.get(t.patientId)),
+        /* Receipt facts: prefer what was denormalised at write time, backfill
+           legacy rows from the register so every receipt can show the sex. */
+        patientSex: t.patientSex || byId.get(t.patientId)?.gender || '',
+      }))
 
     /* Procedure / amount / quantity inventory, so the dashboard can render its
        Inventory card without a second round-trip. Same payload as

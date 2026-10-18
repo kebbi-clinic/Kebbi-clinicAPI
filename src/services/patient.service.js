@@ -4,6 +4,7 @@ const { PatientModel, VisitModel, VitalModel, InvestigationModel, PrescriptionMo
         PaymentModel, AdmissionModel, WalletTxModel, ActivityModel, AuditModel, clean } = require('../models')
 const { nextId } = require('../config/db')
 const { now, byNewest } = require('../utils/datetime')
+const { insufficientWalletError } = require('../utils/wallet')
 const { audit } = require('./audit.service')
 const { notify } = require('./notification.service')
 const { currentActivationFee } = require('./settings.service')
@@ -221,15 +222,13 @@ async function activate(patientOrId, actor) {
 
   /* Read the stored fee, never the per-instance cache: the number shown on
      the activation notice comes from the same stored document, so the two
-     can no longer disagree (₦0 announced but ₦2,000 charged). */
+     can no longer disagree (₦0 announced but ₦2,000 charged). A wallet that
+     cannot cover the fee refuses activation outright — same bold "top up the
+     patient's wallet" error every other billing flow raises. */
   const fee = await currentActivationFee()
   const balance = Number(patient.wallet) || 0
   if (fee > 0 && balance < fee) {
-    const err = new Error(
-      `Cannot activate ${patient.id}: the activation fee is ₦${fee.toLocaleString()} but the wallet holds only ₦${balance.toLocaleString()}. Fund the wallet first.`,
-    )
-    err.status = 400
-    throw err
+    throw insufficientWalletError(patient, fee, 'the activation fee')
   }
 
   const at = now()
@@ -261,20 +260,28 @@ async function activate(patientOrId, actor) {
     })
   }
 
-  /* The wallet ledger and the revenue record for the activation charge. */
+  /* The wallet ledger and the revenue record for the activation charge — the
+     ledger row (with the receipt facts) rides back with the response. */
+  let wtx = null
   if (fee > 0) {
     const wtxId = await nextId('wallet')
-    await WalletTxModel.create({
+    wtx = await WalletTxModel.create({
       _id: wtxId, id: wtxId,
-      patientId: patient.id, type: 'Debit', amount: fee,
+      patientId: patient.id,
+      patientName: `${patient.firstName} ${patient.surname}`,
+      patientSex: patient.gender || '',
+      type: 'Debit', amount: fee,
       reason: 'Patient activation', method: 'Wallet',
-      staff: actor.name, at, balanceAfter: patient.wallet,
+      staff: actor.name, staffRole: actor.role || '', at, balanceAfter: patient.wallet,
     })
     const pay = new PaymentModel({
       _id: await nextId('payment'), id: '', ref: '',
       patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
+      patientSex: patient.gender || '',
       amount: fee, method: 'Wallet', service: 'Patient activation',
-      staff: actor.name, at, status: 'Paid',
+      staff: actor.name, staffRole: actor.role || '',
+      txId: wtx.id,
+      at, status: 'Paid',
     })
     pay.id = pay._id
     await pay.save()
@@ -297,7 +304,10 @@ async function activate(patientOrId, actor) {
     (fee > 0 ? `Activation fee ₦${fee.toLocaleString()} charged to wallet` : 'No activation fee')
     + (openedVisit ? ` — visit ${openedVisit} opened` : ''))
 
-  return { ...clean(patient), activationFee: fee, alreadyActive: false, visitId: openedVisit }
+  return {
+    ...clean(patient), activationFee: fee, alreadyActive: false, visitId: openedVisit,
+    walletTx: wtx ? clean(wtx) : null,
+  }
 }
 
 module.exports = {

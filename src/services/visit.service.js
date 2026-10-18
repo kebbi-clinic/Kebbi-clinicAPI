@@ -4,6 +4,7 @@ const { PatientModel, VisitModel, InvestigationModel, PrescriptionModel, DrugMod
         AdmissionModel, PaymentModel, WalletTxModel, clean } = require('../models')
 const { nextId, getSettings } = require('../config/db')
 const { now } = require('../utils/datetime')
+const { assertWalletCovers } = require('../utils/wallet')
 const { audit } = require('./audit.service')
 const { broadcastActivity } = require('../sockets/socket')
 const { notify } = require('./notification.service')
@@ -41,9 +42,10 @@ const isAdmission = (v) => v === 'Admission' || v === 'Admit'
 /**
  * Create the admission the doctor asked for, and bill the bed charge.
  * The doctor supplies the number of days and the cost per night; the total is
- * always taken from the patient's wallet — whatever the wallet cannot cover is
- * raised as a pending payment for the accountant (same rule as the pharmacy
- * and the laboratory), so the bed charge is never lost.
+ * taken from the patient's wallet. completeConsultation checked affordability
+ * BEFORE anything was written, so a short wallet never reaches this point — the
+ * consultation is refused outright with a "top up the patient's wallet" error
+ * instead of being admitted with the charge left pending.
  */
 async function createAdmission(visit, body, actor) {
   const ad = body.admission || {}
@@ -53,25 +55,27 @@ async function createAdmission(visit, body, actor) {
   const at = now()
   const patient = await PatientModel.findById(visit.patientId)
 
-  /* Take the bed charge from the wallet — partially when the balance is short. */
+  /* Take the bed charge from the wallet. The affordability guard at the top of
+     completeConsultation already refused any short wallet, so this debit is
+     always in full — and the wallet ledger row doubles as the receipt. */
   let chargedToWallet = false
-  let shortfall = 0
+  let wtx = null
   if (totalCost > 0 && patient) {
     const balance = Number(patient.wallet) || 0
-    const debited = Math.min(balance, totalCost)
-    shortfall = totalCost - debited
-    if (debited > 0) {
-      patient.wallet = balance - debited
-      await patient.save()
-      chargedToWallet = true
-      const wtxId = await nextId('wallet')
-      await WalletTxModel.create({
-        _id: wtxId, id: wtxId,
-        patientId: patient.id, type: 'Debit', amount: debited,
-        reason: `Admission ${days} night(s) at ₦${costPerNight.toLocaleString()}/night`,
-        method: 'Wallet', staff: actor.name, at, balanceAfter: patient.wallet,
-      })
-    }
+    patient.wallet = balance - totalCost
+    await patient.save()
+    chargedToWallet = true
+    const wtxId = await nextId('wallet')
+    wtx = await WalletTxModel.create({
+      _id: wtxId, id: wtxId,
+      patientId: patient.id,
+      patientName: `${patient.firstName} ${patient.surname}`,
+      patientSex: patient.gender || '',
+      type: 'Debit', amount: totalCost,
+      reason: `Admission ${days} night(s) at ₦${costPerNight.toLocaleString()}/night`,
+      method: 'Wallet', staff: actor.name, staffRole: actor.role || '',
+      at, balanceAfter: patient.wallet,
+    })
   }
 
   const admission = new AdmissionModel({
@@ -89,22 +93,23 @@ async function createAdmission(visit, body, actor) {
   admission.id = admission._id
   await admission.save()
 
-  /* The bed charge always produces a revenue record: paid when it came off the
-     wallet, with any shortfall pending for the accountant to collect. */
+  /* The bed charge always produces a revenue record — paid in full, because a
+     short wallet was refused before the admission was ever created. The wallet
+     ledger row (when there is one) is the receipt for this payment. */
+  let pay = null
   if (totalCost > 0) {
-    const fullyPaid = shortfall <= 0.005
-    const pay = new PaymentModel({
+    pay = new PaymentModel({
       _id: await nextId('payment'), id: '', ref: '',
       patientId: visit.patientId, patientName: admission.patientName,
+      patientSex: patient ? patient.gender || '' : '',
       amount: totalCost, method: chargedToWallet ? 'Wallet' : 'Cash',
-      service: `Admission ${days} night(s) — ${admission.ward} ${admission.bed}${fullyPaid ? '' : ' - balance outstanding'}`.trim(),
-      staff: fullyPaid ? actor.name : 'System', at, status: fullyPaid ? 'Paid' : 'Pending',
+      service: `Admission ${days} night(s) — ${admission.ward} ${admission.bed}`.trim(),
+      staff: actor.name, staffRole: actor.role || '',
+      txId: wtx ? wtx.id : '',
+      at, status: 'Paid',
     })
     pay.id = pay._id
     await pay.save()
-    if (!fullyPaid) {
-      await notify('Accountant', `Bed charge outstanding: ₦${shortfall.toLocaleString()} for ${admission.patientName} (${admission.patientId}) — ${days} night(s) in ${admission.ward}.`)
-    }
   }
 
   /* The visit is now an admission, and the ward/nursing team is told. */
@@ -115,7 +120,9 @@ async function createAdmission(visit, body, actor) {
     { patientId: visit.patientId, time: at, what: `Admitted to ${admission.ward} bed ${admission.bed} — ${days} night(s), ₦${totalCost.toLocaleString()}`, meta: `Doctor - ${actor.name}`, dept: 'Nursing', green: true },
     'Nurse', actor.name,
   )
-  return clean(admission)
+  /* The wallet ledger row rides along so the doctor can open the receipt for the
+     bed charge straight away. */
+  return { ...clean(admission), walletTx: wtx ? clean(wtx) : null, payment: pay ? clean(pay) : null }
 }
 
 async function getVisit(id) {
@@ -137,6 +144,23 @@ async function completeConsultation(visitId, body, actor) {
   if (!visit) {
     const err = new Error('Visit not found'); err.status = 404; throw err
   }
+
+  /* AFFORDABILITY FIRST: admitting the patient bills the bed charge (nights ×
+     rate) to the wallet straight away. Check it BEFORE anything is written — a
+     short wallet must refuse the whole consultation with a "top up the patient's
+     wallet" error rather than admit the patient and leave the charge pending.
+     The arithmetic mirrors createAdmission exactly. */
+  if (isAdmission(body.outcome)) {
+    const ad = body.admission || {}
+    const days = Math.max(1, Number(body.days ?? ad.days) || 1)
+    const rate = Math.max(0, Number(body.costPerNight ?? ad.costPerNight ?? getSettings()?.defaultNightlyRate) || 0)
+    const bedTotal = days * rate
+    if (bedTotal > 0) {
+      const p = await PatientModel.findById(visit.patientId)
+      if (p) assertWalletCovers(p, bedTotal, `the bed charge (${days} night${days > 1 ? 's' : ''})`)
+    }
+  }
+
   const isRevisit = !!visit.consultation
   visit.consultation = {
     complaint: body.complaint || '', history: body.history || '', exam: body.exam || '',
@@ -199,10 +223,12 @@ async function completeConsultation(visitId, body, actor) {
       const drug = drugs.find((d) => d.id === it.drugId)
       return {
         drugId: it.drugId, drug: drug?.name || it.drug || '',
-        /* Route (IV/IM/Oral/Rectal), frequency (Daily/BD/TDS/…) and the course
-           length in days come straight from the doctor's prescription form. */
+        /* Route (IV/IM/Oral/Rectal), frequency (Daily/BD/TDS/…), dosage
+           strength (80mg/500mg/…) and the course length in days come straight
+           from the doctor's prescription form. */
         route: it.route || 'Oral',
         frequency: it.frequency || 'Daily',
+        dose: String(it.dose || '').trim().slice(0, 40),
         duration: Number(it.duration) || 1,
         qty: Number(it.qty) || 0,
         price: drug?.price || 0,

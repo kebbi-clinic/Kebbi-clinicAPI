@@ -2,13 +2,15 @@
  *
  * Submitting a result is the billable moment: the test's price — the admin's
  * current catalogue price, re-read right here — is taken from the patient's
- * wallet. What the wallet cannot cover is raised as a pending payment so the
- * accountant still has a record — the result is never blocked and the money is
- * never lost. A result may be a photo/scan OR typed values (either is enough). */
+ * wallet. The wallet must cover it IN FULL: a short wallet refuses the
+ * submission outright and tells the scientist/radiologist to top up the wallet
+ * first, so a result is never recorded with money missing. A result may be a
+ * photo/scan OR typed values (either is enough). */
 const { InvestigationModel, PatientModel, PaymentModel, WalletTxModel,
         ActivityModel, clean } = require('../models')
 const { nextId } = require('../config/db')
 const { now, byNewest } = require('../utils/datetime')
+const { insufficientWalletError } = require('../utils/wallet')
 const { audit } = require('./audit.service')
 const { broadcastActivity } = require('../sockets/socket')
 const { notify } = require('./notification.service')
@@ -24,28 +26,39 @@ async function list(dept) {
   return [...rows].sort(byNewest('createdAt'))
 }
 
-/* Take the test fee from the patient's wallet. Returns the money facts for the
- * response so the laboratory screen can show exactly what moved. */
+/* Take the test fee from the patient's wallet. HARD WALLET GUARD: the wallet
+ * must cover the fee in full — a short wallet REFUSES the result submission
+ * outright (nothing is billed, nothing is written) with a "top up the patient's
+ * wallet" error. Returns the money facts (and the receipt row) for the response
+ * so the laboratory screen can show exactly what moved. */
 async function charge(patientId, inv, actor, at) {
   const price = Number(inv.price) || 0
-  if (price <= 0) return { price: 0, debitedFromWallet: 0, outstanding: 0, walletBalance: null }
+  if (price <= 0) return { price: 0, debitedFromWallet: 0, outstanding: 0, walletBalance: null, walletTx: null }
 
   const patient = await PatientModel.findById(patientId)
-  if (!patient) return { price, debitedFromWallet: 0, outstanding: price, walletBalance: null }
+  if (!patient) return { price, debitedFromWallet: 0, outstanding: price, walletBalance: null, walletTx: null }
 
   const balance = Number(patient.wallet) || 0
-  const debited = Math.min(balance, price)
-  const shortfall = price - debited
+  if (price > balance) {
+    throw insufficientWalletError(patient, price, `${inv.test} (${inv.id})`)
+  }
 
+  const debited = price
+  const shortfall = 0
+
+  let wtx = null
   if (debited > 0) {
     patient.wallet = balance - debited
     await patient.save()
     const wtxId = await nextId('wallet')
-    await WalletTxModel.create({
+    wtx = await WalletTxModel.create({
       _id: wtxId, id: wtxId,
-      patientId: patient.id, type: 'Debit', amount: debited,
+      patientId: patient.id,
+      patientName: `${patient.firstName} ${patient.surname}`,
+      patientSex: patient.gender || '',
+      type: 'Debit', amount: debited,
       reason: `${inv.test} result (${inv.id})`, method: 'Wallet',
-      staff: actor.name, at, balanceAfter: patient.wallet,
+      staff: actor.name, staffRole: actor.role || '', at, balanceAfter: patient.wallet,
     })
   }
 
@@ -53,17 +66,16 @@ async function charge(patientId, inv, actor, at) {
   const pay = new PaymentModel({
     _id: await nextId('payment'), id: '', ref: '',
     patientId: patient.id, patientName: `${patient.firstName} ${patient.surname}`,
+    patientSex: patient.gender || '',
     amount: price, method: 'Wallet',
-    service: `${inv.test} (${inv.id})${paid ? '' : ' - balance outstanding'}`,
-    staff: paid ? actor.name : 'System', at,
+    service: `${inv.test} (${inv.id})`,
+    staff: actor.name, staffRole: actor.role || '',
+    txId: wtx ? wtx.id : '',
+    at,
     status: paid ? 'Paid' : 'Pending',
   })
   pay.id = pay._id
   await pay.save()
-
-  if (!paid) {
-    await notify('Accountant', `Outstanding on ${inv.id} (${inv.test}): ₦${shortfall.toLocaleString()} for ${patient.firstName} ${patient.surname} (${patient.id}).`)
-  }
 
   await ActivityModel.create({
     patientId: patient.id, time: at,
@@ -72,7 +84,7 @@ async function charge(patientId, inv, actor, at) {
     green: true,
   })
 
-  return { price, debitedFromWallet: debited, outstanding: shortfall, walletBalance: patient.wallet }
+  return { price, debitedFromWallet: debited, outstanding: shortfall, walletBalance: patient.wallet, walletTx: wtx ? clean(wtx) : null }
 }
 
 async function saveResult(id, file, { values }, actor) {
@@ -97,7 +109,7 @@ async function saveResult(id, file, { values }, actor) {
      price when the catalogue knows nothing about the test). */
   inv.price = await resolvePrice(inv.test, inv.dept, { fallback: Number(inv.price) || 0 })
   const money = alreadyBilled
-    ? { price: Number(inv.price) || 0, debitedFromWallet: 0, outstanding: 0, walletBalance: null }
+    ? { price: Number(inv.price) || 0, debitedFromWallet: 0, outstanding: 0, walletBalance: null, walletTx: null }
     : await charge(inv.patientId, inv, actor, at)
 
   inv.status = 'Completed'
