@@ -20,7 +20,7 @@ const { assertProdEnv, config } = require('../src/config/env')
  * "blocked by CORS policy" — hiding the actual server fault. Answering
  * preflights here keeps the real status visible in devtools. */
 function isAllowedOrigin(origin) {
-  return !origin || config.corsOrigins.includes('*') || config.corsOrigins.includes(origin)
+  return config.isAllowedOrigin(origin)
 }
 
 function fail(res, req, status, message) {

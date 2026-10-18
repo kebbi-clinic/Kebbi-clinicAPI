@@ -13,7 +13,7 @@ app.disable('x-powered-by')
 /* CORS — only the apps we own. */
 app.use(cors({
   origin(origin, cb) {
-    if (!origin || config.corsOrigins.includes('*') || config.corsOrigins.includes(origin)) return cb(null, true)
+    if (config.isAllowedOrigin(origin)) return cb(null, true)
     return cb(new Error(`Origin ${origin} not allowed by CORS`))
   },
 }))

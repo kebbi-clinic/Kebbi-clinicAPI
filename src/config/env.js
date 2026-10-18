@@ -12,6 +12,23 @@ const corsOrigins = (process.env.CORS_ORIGINS || 'http://localhost:5173,http://l
   .map((o) => o.trim())
   .filter(Boolean)
 
+/* Whether an Origin header is allowed to call the API.
+   Explicitly listed origins always pass; additionally any subdomain of
+   kebbiclinic.com.ng (dashboard, hospital, www, …) is accepted so new
+   deployments don't break CORS whenever a subdomain is added or changed.
+   Requests with no Origin (curl, server-to-server) are allowed. */
+function isAllowedOrigin(origin) {
+  if (!origin) return true
+  if (corsOrigins.includes('*')) return true
+  if (corsOrigins.includes(origin)) return true
+  try {
+    const host = new URL(origin).hostname
+    if (host === 'kebbiclinic.com.ng' || host.endsWith('.kebbiclinic.com.ng')) return true
+    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true
+  } catch { /* not a URL — fall through to false */ }
+  return false
+}
+
 const config = {
   nodeEnv,
   isProd: nodeEnv === 'production',
@@ -19,6 +36,7 @@ const config = {
 
   port: Number(process.env.PORT) || 4000,
   corsOrigins,
+  isAllowedOrigin,
 
   /* Web Push (VAPID). Optional — when absent a key pair is generated once and
      persisted in the database, so notifications work with zero setup. */
