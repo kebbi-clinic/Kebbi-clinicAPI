@@ -1,6 +1,8 @@
 /* Validation schemas — patients & visits. */
 const { body, param, query } = require('express-validator')
 
+const BLOOD_GROUPS = ['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-']
+
 const registerPatient = [
   body('firstName').trim().notEmpty().withMessage('First name is required').isLength({ max: 60 }),
   body('surname').trim().notEmpty().withMessage('Surname is required').isLength({ max: 60 }),
@@ -10,6 +12,7 @@ const registerPatient = [
     .matches(/^[0-9+\-\s()]{7,20}$/).withMessage('Phone number is not valid'),
   body('address').trim().notEmpty().withMessage('Address is required').isLength({ max: 200 }),
   body('email').optional({ values: 'falsy' }).isEmail().withMessage('Email is not valid').normalizeEmail(),
+  body('bloodGroup').optional({ values: 'falsy' }).trim().isIn(BLOOD_GROUPS).withMessage('Blood group must be one of O+, O-, A+, A-, B+, B-, AB+, AB-'),
   body('nextOfKin.name').optional({ values: 'null' }).isString().isLength({ max: 120 }),
   body('nextOfKin.phone').optional({ values: 'null' }).matches(/^[0-9+\-\s()]{7,20}$/).withMessage('Next-of-kin phone is not valid'),
 ]
@@ -32,4 +35,12 @@ const patientStatus = [
   body('status').isIn(['Active', 'Inactive']).withMessage('Status must be Active or Inactive'),
 ]
 
-module.exports = { registerPatient, listPatients, startVisit, patientStatus }
+/* Records may correct demographics (blood group) on an existing patient. */
+const updatePatient = [
+  param('id').trim().notEmpty().withMessage('Patient id is required'),
+  body('bloodGroup').optional({ values: 'falsy' }).trim().isIn(BLOOD_GROUPS).withMessage('Blood group must be one of O+, O-, A+, A-, B+, B-, AB+, AB-'),
+  body('phone').optional({ values: 'falsy' }).trim().matches(/^[0-9+\-\s()]{7,20}$/).withMessage('Phone number is not valid'),
+  body('address').optional({ values: 'falsy' }).trim().isLength({ max: 200 }),
+]
+
+module.exports = { registerPatient, listPatients, startVisit, patientStatus, updatePatient, BLOOD_GROUPS }

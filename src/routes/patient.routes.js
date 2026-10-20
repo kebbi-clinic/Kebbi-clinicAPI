@@ -2,7 +2,7 @@ const { Router } = require('express')
 const controller = require('../controllers/patient.controller')
 const { requireAuth, requirePerm } = require('../middleware/auth.middleware')
 const { validate } = require('../middleware/validate')
-const { registerPatient, listPatients, startVisit, patientStatus } = require('../validators/patient.validator')
+const { registerPatient, listPatients, startVisit, patientStatus, updatePatient } = require('../validators/patient.validator')
 
 const router = Router()
 router.use(requireAuth)
@@ -10,6 +10,7 @@ router.use(requireAuth)
 router.get('/', validate(listPatients), controller.list)
 router.post('/', requirePerm('patients.register'), validate(registerPatient), controller.register)
 router.get('/:id', controller.get)
+router.put('/:id', requirePerm('patients.register'), validate(updatePatient), controller.update)
 router.post('/:id/visits', requirePerm('visits.start'), validate(startVisit), controller.startVisit)
 /* Activation is restricted to `patients.activate` (Records Officer). The status
    endpoint deliberately cannot be used to activate — it needs `patients.status`,

@@ -85,6 +85,29 @@ async function register(body, actor) {
   return clean(patient)
 }
 
+/** Records correction of demographics (blood group / phone / address). */
+const BLOOD_GROUPS = ['O+', 'O-', 'A+', 'A-', 'B+', 'B-', 'AB+', 'AB-']
+async function update(id, body, actor) {
+  const patient = await PatientModel.findById(id)
+  if (!patient) throw notFound('Patient not found')
+  const patch = {}
+  if (body.bloodGroup !== undefined) {
+    const bg = String(body.bloodGroup || '').trim().toUpperCase()
+    if (bg && !BLOOD_GROUPS.includes(bg)) {
+      const err = new Error('Blood group must be one of O+, O-, A+, A-, B+, B-, AB+, AB-')
+      err.status = 422; throw err
+    }
+    patch.bloodGroup = bg || ''
+  }
+  if (body.phone !== undefined) patch.phone = String(body.phone || '').trim()
+  if (body.address !== undefined) patch.address = String(body.address || '').trim()
+  if (Object.keys(patch).length === 0) return clean(patient)
+  Object.assign(patient, patch)
+  await patient.save()
+  await audit(actor.name, 'Updated patient', patient.id, 'Records', Object.keys(patch).join(', '))
+  return clean(patient)
+}
+
 /** Escape user text before it goes inside a RegExp. */
 function escapeRegex(s) {
   return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
@@ -311,6 +334,6 @@ async function activate(patientOrId, actor) {
 }
 
 module.exports = {
-  list, register, get360, getBasic, startVisit, setStatus, activate,
+  list, register, get360, getBasic, startVisit, setStatus, activate, update,
   canSeeInactive, canActivate,
 }
