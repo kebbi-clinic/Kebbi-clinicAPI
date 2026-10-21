@@ -150,10 +150,10 @@ async function roleDashboard(role) {
 
   /* ---- Accountant ---- */
   if (caps.includes('wallet.fund')) {
-    const paid = payments.filter((p) => p.status === 'Paid')
-    stats.revenue = sum(paid)
+    const funding = payments.filter((p) => p.service === 'Wallet funding')
+    stats.revenue = sum(funding)
     stats.pending = payments.filter((p) => p.status === 'Pending').length
-    stats.completed = paid.length
+    stats.completed = funding.length
     stats.funding = sum(walletTxs.filter((t) => t.type === 'Credit' && String(t.at).startsWith(dayStr)))
     out.txs = walletTxs.sort(byTimeDesc('at')).slice(0, 30)
       .map((t) => ({
@@ -201,9 +201,9 @@ async function hospitalStats() {
     today: visits.filter((v) => String(v.createdAt).startsWith(dayPrefixStr)).length,
     totalStaff: staff.length,
     roleCounts,
-    revenueToday: sum(payments.filter((p) => String(p.at).startsWith(dayPrefixStr))),
-    revenueWeek: sum(inRange(payments, weekAgo)),
-    revenueMonth: sum(inRange(payments, monthAgo)),
+    revenueToday: sum(payments.filter((p) => p.service === 'Wallet funding' && String(p.at).startsWith(dayPrefixStr))),
+    revenueWeek: sum(inRange(payments.filter((p) => p.service === 'Wallet funding'), weekAgo)),
+    revenueMonth: sum(inRange(payments.filter((p) => p.service === 'Wallet funding'), monthAgo)),
     walletFunding: sum(walletTxs.filter((t) => t.type === 'Credit')),
     pendingInvestigations: investigations.filter((i) => i.status !== 'Completed').length,
     admitted: admissions.filter((a) => a.status === 'Admitted').length,
@@ -230,8 +230,16 @@ async function reports(q = '') {
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1)
   const inRange = (rows, from) => rows.filter((r) => { const d = parseWhen(r.at); return d && d >= from })
 
-  const paid = { daily: sum(inRange(payments, today)), weekly: sum(inRange(payments, weekAgo)), monthly: sum(inRange(payments, monthStart)) }
-  const byMethod = payments.reduce((acc, p) => { acc[p.method || 'Other'] = (acc[p.method || 'Other'] || 0) + (Number(p.amount) || 0); return acc }, {})
+  /* Revenue = only money credited into patients' wallets (wallet funding /
+     top-ups). Service payments, drug sales, procedure bills etc. are debits
+     out of the wallet and must NOT count as hospital revenue here. */
+  const funding = payments.filter((p) => p.service === 'Wallet funding')
+  const paid = {
+    daily: sum(inRange(funding, today)),
+    weekly: sum(inRange(funding, weekAgo)),
+    monthly: sum(inRange(funding, monthStart)),
+  }
+  const byMethod = funding.reduce((acc, p) => { acc[p.method || 'Other'] = (acc[p.method || 'Other'] || 0) + (Number(p.amount) || 0); return acc }, {})
 
   const dispensedRx = prescriptions.filter((p) => p.status === 'Dispensed')
   const rxSales = dispensedRx.reduce((t, p) => t + (p.items || []).reduce((s, i) => s + (Number(i.qty) || 0) * (Number(i.price) || 0), 0), 0)
