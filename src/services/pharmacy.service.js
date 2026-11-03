@@ -1,7 +1,7 @@
 /* Pharmacy service — prescription dispensing & inventory, with wallet billing,
  * payment records, wallet ledger and low-stock email alerts (Mailtrap). */
 const { PatientModel, PrescriptionModel, PaymentModel, WalletTxModel, DrugModel,
-        ActivityModel, InvestigationModel, clean } = require('../models')
+        ActivityModel, InvestigationModel, OTCSaleModel, clean } = require('../models')
 const { nextId } = require('../config/db')
 const { now, byNewest } = require('../utils/datetime')
 const { insufficientWalletError } = require('../utils/wallet')
@@ -160,4 +160,132 @@ async function updateDrug(id, body, actor) {
   return clean(drug)
 }
 
-module.exports = { listPrescriptions, dispense, listDrugs, createDrug, updateDrug }
+/* ---- Over-the-counter (cash) drug sales to non-patients ----------------- */
+
+async function createOTCSale({ items, customerName, customerPhone }, actor) {
+  if (!Array.isArray(items) || !items.length) {
+    const err = new Error('Add at least one drug to the sale'); err.status = 422; throw err
+  }
+  const customer = String(customerName || '').trim()
+  if (!customer) {
+    const err = new Error('Customer name is required'); err.status = 422; throw err
+  }
+
+  const drugs = await DrugModel.find()
+  const lineItems = []
+  let total = 0
+  for (const it of items) {
+    const drug = drugs.find((d) => d.id === it.drugId)
+    if (!drug) {
+      const err = new Error(`Unknown drug ${it.drugId}`); err.status = 422; throw err
+    }
+    const qty = Number(it.qty) || 0
+    if (qty < 1) {
+      const err = new Error(`Quantity for ${drug.name} must be at least 1`); err.status = 422; throw err
+    }
+    lineItems.push({ drugId: drug.id, drug: drug.name, qty, price: Number(drug.price) || 0 })
+    total += Number(drug.price || 0) * qty
+  }
+
+  /* A Pending sale is just a held cart: nothing is debited, no stock moves
+   * yet, and no patient is required — the customer pays the accountant later.
+   * The sale id (e.g. OTC-000001) is the reference the customer carries. */
+  const id = await nextId('otc')
+  const at = now()
+  const sale = new OTCSaleModel({
+    _id: id, id,
+    customerName: customer,
+    customerPhone: String(customerPhone || '').trim(),
+    items: lineItems, total,
+    status: 'Pending',
+    createdBy: actor.name, createdByRole: actor.role || '', createdAt: at,
+  })
+  sale.id = sale._id
+  await sale.save()
+  await audit(actor.name, 'Created over-the-counter sale', customer, 'Pharmacy', `${id} — ₦${total.toLocaleString()}`)
+  return clean(sale)
+}
+
+async function markOTCSalePaid(saleId, { paymentMethod }, actor) {
+  const sale = await OTCSaleModel.findOne({ id: saleId })
+  if (!sale) {
+    const err = new Error('Sale not found'); err.status = 404; throw err
+  }
+  if (sale.status !== 'Pending') {
+    const err = new Error(`Sale ${saleId} is already ${sale.status.toLowerCase()}`); err.status = 409; throw err
+  }
+
+  const methods = getSettings()?.paymentMethods || ['Wallet', 'Cash', 'Transfer', 'POS']
+  if (!methods.includes(paymentMethod)) {
+    const err = new Error(`Payment method must be one of: ${methods.join(', ')}`); err.status = 422; throw err
+  }
+
+  /* Stock only leaves the shelf once the accountant marks the sale Paid — a
+   * Pending sale is a held cart, so an unpaid customer never burns stock. */
+  const drugs = await DrugModel.find()
+  for (const it of sale.items) {
+    const drug = drugs.find((d) => d.id === it.drugId)
+    if (!drug) {
+      const err = new Error(`Drug ${it.drug} is no longer available`); err.status = 422; throw err
+    }
+    if ((drug.stock || 0) < it.qty) {
+      const err = new Error(`Insufficient stock for ${it.drug} (need ${it.qty}, have ${drug.stock || 0})`); err.status = 402; throw err
+    }
+  }
+
+  const at = now()
+  for (const it of sale.items) {
+    const drug = drugs.find((d) => d.id === it.drugId)
+    drug.stock = (drug.stock || 0) - it.qty
+    await drug.save()
+  }
+
+  const pay = new PaymentModel({
+    _id: await nextId('payment'), id: '', ref: '',
+    patientId: sale.id, patientName: sale.customerName, patientSex: '',
+    amount: sale.total, method: paymentMethod,
+    service: `Over-the-counter drug sale ${sale.id}`,
+    staff: actor.name, staffRole: actor.role || '',
+    txId: '', at, status: 'Paid',
+  })
+  pay.id = pay._id
+  await pay.save()
+
+  sale.status = 'Paid'
+  sale.paymentMethod = paymentMethod
+  sale.paidAt = at
+  sale.paidBy = actor.name
+  sale.paidByRole = actor.role || ''
+  sale.paymentId = pay.id
+  await sale.save()
+
+  await ActivityModel.create({
+    patientId: sale.id, time: at,
+    what: `Over-the-counter sale paid — ₦${sale.total.toLocaleString()}`,
+    meta: `Accounting - ${actor.name}`, dept: 'Accounting', green: true,
+  })
+  broadcastActivity({
+    patientId: sale.id, time: at,
+    what: `Over-the-counter sale paid — ₦${sale.total.toLocaleString()}`,
+    meta: `Accounting - ${actor.name}`, dept: 'Accounting', green: true,
+  }, undefined, actor.name)
+  await audit(actor.name, 'Marked over-the-counter sale paid', sale.id, 'Accounting', `${sale.id} — ₦${sale.total.toLocaleString()} (${paymentMethod})`)
+
+  return { sale: clean(sale), payment: clean(pay) }
+}
+
+async function listOTCSales() {
+  const rows = await OTCSaleModel.find().sort('-createdAt').lean()
+  return rows.map(clean)
+}
+
+async function getOTCSale(id) {
+  const sale = await OTCSaleModel.findOne({ id })
+  if (!sale) {
+    const err = new Error('Sale not found'); err.status = 404; throw err
+  }
+  return clean(sale)
+}
+
+module.exports = { listPrescriptions, dispense, listDrugs, createDrug, updateDrug,
+  createOTCSale, markOTCSalePaid, listOTCSales, getOTCSale }

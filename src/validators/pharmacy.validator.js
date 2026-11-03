@@ -32,6 +32,25 @@ const dispense = [
   }),
 ]
 
+/* Over-the-counter (cash) sale to a walk-in customer who is not a patient. */
+const createOTCSale = [
+  body('customerName').trim().notEmpty().withMessage('Customer name is required').isLength({ max: 120 }),
+  body('customerPhone').optional({ values: 'falsy' }).trim().isString().isLength({ max: 40 }),
+  body('items').isArray({ min: 1 }).withMessage('Add at least one drug to the sale'),
+  body('items.*.drugId').trim().notEmpty().withMessage('Each item needs a drugId'),
+  body('items.*.qty').isInt({ min: 1 }).withMessage('Each item quantity must be at least 1'),
+]
+
+const payOTCSale = [
+  param('id').trim().notEmpty().withMessage('Sale id is required'),
+  body('paymentMethod').notEmpty().withMessage('Payment method is required')
+    .custom((v) => {
+      const methods = getSettings()?.paymentMethods || ['Wallet', 'Cash', 'Transfer', 'POS']
+      if (!methods.includes(v)) throw new Error(`Payment method must be one of: ${methods.join(', ')}`)
+      return true
+    }),
+]
+
 /* Laboratory & radiology test catalogue — inventory and prices. */
 const testId = [
   param('id').trim().notEmpty().withMessage('Test id is required'),
@@ -98,4 +117,4 @@ const performService = [
     .withMessage('Settlement must be Wallet, Cash, Transfer or POS'),
 ]
 
-module.exports = { createDrug, updateDrug, dispense, testId, createTest, updateTest, createService, updateService, performService, serviceId }
+module.exports = { createDrug, updateDrug, dispense, testId, createTest, updateTest, createService, updateService, performService, serviceId, createOTCSale, payOTCSale }

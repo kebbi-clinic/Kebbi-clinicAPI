@@ -76,7 +76,7 @@ const COUNTERS = {
   patient: 'KBC', visit: 'VIS', vital: 'VIT', investigation: 'INV',
   radiology: 'RDG', prescription: 'RX', admission: 'ADM', payment: 'PAY',
   wallet: 'WTX', drug: 'DRG', staff: 'STF',
-  service: 'SVC', procedure: 'PRC', test: 'TST',
+  service: 'SVC', procedure: 'PRC', test: 'TST', otc: 'OTC',
 }
 
 /* Bump when new settings fields or capabilities are introduced. Databases with a

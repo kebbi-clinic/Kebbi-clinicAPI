@@ -14,6 +14,7 @@ const ServiceModel = require('./service.model')
 const ActivityModel = require('./activity.model')
 const AuditModel = require('./audit.model')
 const NotificationModel = require('./notification.model')
+const OTCSaleModel = require('./otcSale.model')
 const { PushSubModel, PushKeyModel } = require('./push.model')
 const { SettingModel, CounterModel } = require('./setting.model')
 const { clean, cleanList } = require('../utils/clean')
@@ -21,7 +22,7 @@ const { clean, cleanList } = require('../utils/clean')
 module.exports = {
   StaffModel, PatientModel, VisitModel, VitalModel, InvestigationModel,
   PrescriptionModel, AdmissionModel, PaymentModel, WalletTxModel, DrugModel,
-  TestModel, ServiceModel,
+  TestModel, ServiceModel, OTCSaleModel,
   ActivityModel, AuditModel, NotificationModel, PushSubModel, PushKeyModel,
   SettingModel, CounterModel,
   clean, cleanList,
