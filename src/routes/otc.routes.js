@@ -10,7 +10,11 @@ router.use(requireAuth)
 /* Pharmacist rings up a walk-in (non-patient) cash sale as Pending — the
  * customer receives the sale id and pays the accountant later. */
 router.post('/sales', requirePerm('rx.dispense'), validate(createOTCSale), controller.createOTCSale)
-router.get('/sales', requirePerm('rx.dispense'), controller.listOTCSales)
+/* Pharmacist (rx.dispense) and Accountant (wallet.fund) may both view the
+ * OTC sales list — the pharmacist rings them up, the accountant searches by
+ * the customer's reference id and marks them Paid. Creating a sale
+ * (POST /sales) remains pharmacist-only. */
+router.get('/sales', requirePerm('rx.dispense', 'wallet.fund'), controller.listOTCSales)
 router.get('/sales/:id', requirePerm('rx.dispense'), controller.getOTCSale)
 
 /* Accountant marks a Pending sale Paid with a payment method — stock moves
