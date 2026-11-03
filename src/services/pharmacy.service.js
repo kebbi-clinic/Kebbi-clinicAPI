@@ -215,7 +215,10 @@ async function markOTCSalePaid(saleId, { paymentMethod }, actor) {
     const err = new Error(`Sale ${saleId} is already ${sale.status.toLowerCase()}`); err.status = 409; throw err
   }
 
-  const methods = getSettings()?.paymentMethods || ['Wallet', 'Cash', 'Transfer', 'POS']
+  /* Safe read of payment methods – never throw on cold start / missing cache. */
+  let methods
+  try { methods = getSettings()?.paymentMethods } catch { methods = undefined }
+  methods = methods || ['Wallet', 'Cash', 'Transfer', 'POS']
   if (!methods.includes(paymentMethod)) {
     const err = new Error(`Payment method must be one of: ${methods.join(', ')}`); err.status = 422; throw err
   }

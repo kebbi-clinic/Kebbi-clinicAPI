@@ -26,7 +26,10 @@ const updateDrug = [
 const dispense = [
   param('id').trim().notEmpty().withMessage('Prescription id is required'),
   body('method').optional().custom((v) => {
-    const methods = getSettings()?.paymentMethods || ['Wallet', 'Cash', 'Transfer', 'POS']
+    /* Safe read of payment methods – never throw on cold start / missing cache. */
+    let methods
+    try { methods = getSettings()?.paymentMethods } catch { methods = undefined }
+    methods = methods || ['Wallet', 'Cash', 'Transfer', 'POS']
     if (!methods.includes(v)) throw new Error(`Payment method must be one of: ${methods.join(', ')}`)
     return true
   }),
@@ -45,7 +48,10 @@ const payOTCSale = [
   param('id').trim().notEmpty().withMessage('Sale id is required'),
   body('paymentMethod').notEmpty().withMessage('Payment method is required')
     .custom((v) => {
-      const methods = getSettings()?.paymentMethods || ['Wallet', 'Cash', 'Transfer', 'POS']
+      /* Safe read of payment methods – never throw on cold start / missing cache. */
+      let methods
+      try { methods = getSettings()?.paymentMethods } catch { methods = undefined }
+      methods = methods || ['Wallet', 'Cash', 'Transfer', 'POS']
       if (!methods.includes(v)) throw new Error(`Payment method must be one of: ${methods.join(', ')}`)
       return true
     }),
